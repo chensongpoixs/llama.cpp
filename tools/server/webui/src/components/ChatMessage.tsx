@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useAppContext } from '../utils/app.context';
-import { Message, PendingMessage } from '../utils/types';
+import { Message, MessageExtra, PendingMessage } from '../utils/types';
 import { classNames } from '../utils/misc';
 import MarkdownDisplay, { CopyButton } from './MarkdownDisplay';
 import {
@@ -11,6 +11,9 @@ import {
 } from '@heroicons/react/24/outline';
 import ChatInputExtraContextItem from './ChatInputExtraContextItem';
 import { BtnWithTooltips } from '../utils/common';
+import { useChatExtraContext } from './useChatExtraContext';
+import { ChatTextareaApi, useChatTextarea } from './useChatTextarea';
+import { ChatInput } from './ChatScreen';
 
 interface SplitMessage {
   content: PendingMessage['content'];
@@ -33,11 +36,17 @@ export default function ChatMessage({
   siblingCurrIdx: number;
   id?: string;
   onRegenerateMessage(msg: Message): void;
-  onEditMessage(msg: Message, content: string): void;
+  onEditMessage(
+    msg: Message,
+    content: string,
+    extra: MessageExtra[] | undefined
+  ): void;
   onChangeSibling(sibling: Message['id']): void;
   isPending?: boolean;
 }) {
   const { viewingChat, config } = useAppContext();
+  const extraContext = useChatExtraContext(msg.extra ?? []);
+  const textarea: ChatTextareaApi = useChatTextarea('');
   const [editingContent, setEditingContent] = useState<string | null>(null);
   const timings = useMemo(
     () =>
@@ -99,45 +108,37 @@ export default function ChatMessage({
           'chat-end': isUser,
         })}
       >
-        {msg.extra && msg.extra.length > 0 && (
+        {msg.extra && msg.extra.length > 0 && editingContent === null && (
           <ChatInputExtraContextItem items={msg.extra} clickToShow />
         )}
 
         <div
           className={classNames({
-            'chat-bubble markdown': true,
+            'chat-bubble markdown': editingContent === null,
+            'w-full': editingContent !== null,
             'chat-bubble bg-transparent': !isUser,
           })}
         >
           {/* textarea for editing message */}
           {editingContent !== null && (
-            <>
-              <textarea
-                dir="auto"
-                className="textarea textarea-bordered bg-base-100 text-base-content max-w-2xl w-[calc(90vw-8em)] h-24"
-                value={editingContent}
-                onChange={(e) => setEditingContent(e.target.value)}
-              ></textarea>
-              <br />
-              <button
-                className="btn btn-ghost mt-2 mr-2"
-                onClick={() => setEditingContent(null)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn mt-2"
-                onClick={() => {
-                  if (msg.content !== null) {
-                    setEditingContent(null);
-                    onEditMessage(msg as Message, editingContent);
-                  }
-                }}
-              >
-                Submit
-              </button>
-            </>
+            <ChatInput
+              textarea={textarea}
+              extraContext={extraContext}
+              onSend={() => {
+                if (msg.content !== null) {
+                  setEditingContent(null);
+                  onEditMessage(
+                    msg as Message,
+                    textarea.value(),
+                    extraContext.items
+                  );
+                }
+              }}
+              onStop={() => setEditingContent(null)}
+              canCancel
+            />
           )}
+
           {/* not editing content, render message */}
           {editingContent === null && (
             <>
@@ -237,7 +238,13 @@ export default function ChatMessage({
           {msg.role === 'user' && (
             <BtnWithTooltips
               className="btn-mini w-8 h-8"
-              onClick={() => setEditingContent(msg.content)}
+              onClick={() => {
+                setEditingContent(msg.content);
+                // Ensure textarea gets the value after setting editing state
+                setTimeout(() => {
+                  textarea.setValue(msg.content || '');
+                }, 0);
+              }}
               disabled={msg.content === null}
               tooltipsContent="Edit message"
             >

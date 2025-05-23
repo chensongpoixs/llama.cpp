@@ -1,7 +1,12 @@
 import { ClipboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { CallbackGeneratedChunk, useAppContext } from '../utils/app.context';
 import ChatMessage from './ChatMessage';
-import { CanvasType, Message, PendingMessage } from '../utils/types';
+import {
+  CanvasType,
+  Message,
+  MessageExtra,
+  PendingMessage,
+} from '../utils/types';
 import { classNames, cleanCurrentUrl } from '../utils/misc';
 import CanvasPyInterpreter from './CanvasPyInterpreter';
 import StorageUtils from '../utils/storage';
@@ -158,7 +163,11 @@ export default function ChatScreen() {
   // for vscode context
   textarea.refOnSubmit.current = sendNewMessage;
 
-  const handleEditMessage = async (msg: Message, content: string) => {
+  const handleEditMessage = async (
+    msg: Message,
+    content: string,
+    extra: MessageExtra[] | undefined
+  ) => {
     if (!viewingChat) return;
     setCurrNodeId(msg.id);
     scrollToBottom(false);
@@ -166,7 +175,7 @@ export default function ChatScreen() {
       viewingChat.conv.id,
       msg.parent,
       content,
-      msg.extra,
+      extra,
       onChunk
     );
     setCurrNodeId(-1);
@@ -297,18 +306,20 @@ function ServerInfo() {
   );
 }
 
-function ChatInput({
+export function ChatInput({
   textarea,
   extraContext,
   onSend,
   onStop,
   isGenerating,
+  canCancel,
 }: {
   textarea: ChatTextareaApi;
   extraContext: ChatExtraContextApi;
   onSend: () => void;
   onStop: () => void;
-  isGenerating: boolean;
+  isGenerating?: boolean;
+  canCancel?: boolean;
 }) {
   const { config } = useAppContext();
   const [isDrag, setIsDrag] = useState(false);
@@ -404,7 +415,7 @@ function ChatInput({
                   htmlFor="file-upload"
                   className={classNames({
                     'btn w-8 h-8 p-0 rounded-full': true,
-                    'btn-disabled': isGenerating,
+                    'btn-disabled': isGenerating ?? false,
                   })}
                   aria-label="Upload file"
                   tabIndex={0}
@@ -419,18 +430,34 @@ function ChatInput({
                   {...getInputProps()}
                   hidden
                 />
-                {isGenerating ? (
+
+                {canCancel && (
+                  <>
+                    <button className="btn btn-primary mt-2" onClick={onSend}>
+                      Submit
+                    </button>
+                    <button
+                      className="btn btn-neutral mt-2 mr-2"
+                      onClick={onStop}
+                    >
+                      Cancel
+                    </button>
+                  </>
+                )}
+
+                {!canCancel && isGenerating && (
                   <button
                     className="btn btn-neutral w-8 h-8 p-0 rounded-full"
                     onClick={onStop}
                   >
                     <StopIcon className="h-5 w-5" />
                   </button>
-                ) : (
+                )}
+
+                {!canCancel && !isGenerating && (
                   <button
                     className="btn btn-primary w-8 h-8 p-0 rounded-full"
                     onClick={onSend}
-                    aria-label="Send message"
                   >
                     <ArrowUpIcon className="h-5 w-5" />
                   </button>
