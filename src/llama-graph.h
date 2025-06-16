@@ -219,14 +219,18 @@ public:
         hparams(hparams),
         cparams(cparams) {
     }
+
     ~llm_graph_input_attn_no_cache() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
 
     ggml_tensor * get_kq_mask() const { return kq_mask_cnv; }
+    ggml_tensor * get_kq_mask_swa() const { return kq_mask_swa_cnv; }
 
-    ggml_tensor * kq_mask     = nullptr; // F32 [n_tokens, n_batch]
-    ggml_tensor * kq_mask_cnv = nullptr; //     [n_tokens, n_batch]
+    ggml_tensor * kq_mask         = nullptr; // F32 [n_tokens, n_batch]
+    ggml_tensor * kq_mask_cnv     = nullptr; //     [n_tokens, n_batch]
+    ggml_tensor * kq_mask_swa     = nullptr; // F32 [n_tokens, n_batch] - for SWA
+    ggml_tensor * kq_mask_swa_cnv = nullptr; //     [n_tokens, n_batch] - for SWA
 
     const llama_hparams & hparams;
     const llama_cparams & cparams;
@@ -621,7 +625,8 @@ struct llm_graph_context {
             ggml_tensor * cls,
             ggml_tensor * cls_b,
             ggml_tensor * cls_out,
-            ggml_tensor * cls_out_b) const;
+            ggml_tensor * cls_out_b,
+            ggml_tensor * cls_norm) const;
 };
 
 // TODO: better name
