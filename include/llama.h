@@ -495,6 +495,8 @@ extern "C" {
 
     LLAMA_API int32_t llama_vocab_n_tokens(const struct llama_vocab * vocab);
 
+    LLAMA_API int32_t llama_model_n_nextn_layer(const struct llama_model * model);
+
     // Functions to access the model's GGUF metadata scalar values
     // - The functions return the length of the string on success, or -1 on failure
     // - The output string is always null-terminated and cleared on failure
@@ -547,6 +549,8 @@ extern "C" {
             const char * fname_inp,
             const char * fname_out,
             const llama_model_quantize_params * params);
+
+
 
     //
     // Adapters
@@ -1474,6 +1478,9 @@ extern "C" {
             int64_t                   idata_split,
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
+
+    LLAMA_API void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+        const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx);
 
 #ifdef __cplusplus
 }

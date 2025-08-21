@@ -1304,6 +1304,7 @@ struct server_task_result_apply_lora : server_task_result {
     }
 };
 
+
 struct server_slot {
     int id;
     int id_task = -1;
@@ -1320,6 +1321,9 @@ struct server_slot {
     mtmd_context * mctx = nullptr;
 
     common_speculative * spec = nullptr;
+    bool has_mtp = false;
+    std::vector<mtp_kv_update_data> mtp_kv_update_batch;
+    int32_t last_tok_idx = -1;
 
     std::vector<common_adapter_lora_info> lora;
 
@@ -1419,7 +1423,7 @@ struct server_slot {
     }
 
     bool need_embd() const {
-        return server_task_type_need_embd(task_type);
+        return server_task_type_need_embd(task_type) || has_mtp;
     }
 
     bool need_logits() const {
@@ -1459,7 +1463,8 @@ struct server_slot {
     }
 
     bool can_speculate() const {
-        return ctx_dft && params.speculative.n_max > 0 && params.cache_prompt;
+        return (ctx_dft || has_mtp) && params.speculative.n_max > 0 && params.cache_prompt;
+        // return (ctx_dft) && params.speculative.n_max > 0 && params.cache_prompt;
     }
 
     void add_token(const completion_token_output & token) {
@@ -1593,6 +1598,7 @@ struct server_slot {
         };
     }
 };
+
 
 struct server_metrics {
     int64_t t_start = 0;
@@ -2161,6 +2167,22 @@ struct server_context {
                 for (auto &pair : params_base.speculative.replacements) {
                     common_speculative_add_replacement_tgt_dft(slot.spec, pair.first.c_str(), pair.second.c_str());
                 }
+            }
+
+            // if model has MTP and no draft model is specified...
+            else if (llama_model_n_nextn_layer(model) > 0) {
+                SRV_INF("model has nextn layers = %d\n", llama_model_n_nextn_layer(model));
+                slot.has_mtp = true;
+
+                // assume one speculative token (true of all well-known MTP models so far)
+                slot.batch_spec = llama_batch_init(2, 0, 1);
+                SLT_DBG(slot, "batch_spec contains %d tokens\n", slot.batch_spec.n_tokens);
+
+                params_base.speculative.n_min = 0;
+                params_base.speculative.n_max = 1;
+
+                SRV_INF("%s\n", "MTP needs embeddings on decode, enabling");
+                llama_set_embeddings(ctx, true);
             }
 
             SLT_INF(slot, "new slot n_ctx_slot = %d\n", slot.n_ctx);
@@ -3458,7 +3480,11 @@ struct server_context {
                         // embedding requires all tokens in the batch to be output
                         const bool need_embd = server_task_type_need_embd(slot.task_type);
 
+                        if (slot.has_mtp) {
+                            slot.mtp_kv_update_batch.push_back({ cur_tok, slot.n_past, batch.n_tokens });
+                        }
                         common_batch_add(batch, cur_tok, slot.n_past, { slot.id }, need_embd);
+
                         slot.cache_tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
@@ -3642,10 +3668,17 @@ struct server_context {
                 const int tok_idx = slot.i_batch - i;
 
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
+                slot.last_tok_idx = tok_idx;
+                //SRV_INF("main loop sampled token: '%s'\n", common_token_to_piece(ctx, id, true).c_str());
 
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl, id, true);
+
+                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
+                if (slot.has_mtp) {
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                }
 
                 slot.n_decoded += 1;
 
@@ -3714,23 +3747,38 @@ struct server_context {
 
                 llama_token id = slot.sampled;
 
-                struct common_speculative_params params_spec;
-                params_spec.n_draft   = n_draft_max;
-                params_spec.n_reuse   = llama_n_ctx(slot.ctx_dft) - slot.params.speculative.n_max;
-                params_spec.p_min     = slot.params.speculative.p_min;
+                llama_tokens draft;
+                if (slot.has_mtp) {
+                    llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
+                    draft.reserve(1);
+                    draft.push_back(draft_id);
+                }
+                else {
+                    struct common_speculative_params params_spec;
+                    params_spec.n_draft = n_draft_max;
+                    params_spec.n_reuse = llama_n_ctx(slot.ctx_dft) - slot.params.speculative.n_max;
+                    params_spec.p_min = slot.params.speculative.p_min;
 
-                const llama_tokens & cached_text_tokens = slot.cache_tokens.get_text_tokens();
-                llama_tokens draft = common_speculative_gen_draft(slot.spec, params_spec, cached_text_tokens, id);
+                    const llama_tokens& cached_text_tokens = slot.cache_tokens.get_text_tokens();
+
+                    draft = common_speculative_gen_draft(slot.spec, params_spec, cached_text_tokens, id);
+                }
+
+                //llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
+                //llama_tokens draft;
+                //draft.reserve(1);
+                //draft.push_back(draft_id);
 
                 // ignore small drafts
-                if (slot.params.speculative.n_min > (int) draft.size()) {
-                    SLT_DBG(slot, "ignoring small draft: %d < %d\n", (int) draft.size(), slot.params.speculative.n_min);
+                if (slot.params.speculative.n_min > (int)draft.size()) {
+                    SLT_DBG(slot, "ignoring small draft: %d < %d\n", (int)draft.size(), slot.params.speculative.n_min);
 
                     continue;
                 }
 
                 // keep track of total number of drafted tokens tested
                 slot.n_draft_total += draft.size();
+                SLT_DBG(slot, "draft size = %d\n", draft.size());
 
                 // construct the speculation batch
                 common_batch_clear(slot.batch_spec);
@@ -3746,6 +3794,13 @@ struct server_context {
 
                 // the accepted tokens from the speculation
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
+
+                if (slot.has_mtp) {
+                    for (int32_t i = 0; i < ids.size(); ++i) {
+                        slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + 1 + i, i });
+                    }
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                }
 
                 slot.n_past    += ids.size();
                 slot.n_decoded += ids.size();
