@@ -387,9 +387,10 @@ llama_token mtp_speculative_gen_draft(
         /*.logits = */      logits_data
     };
 
-    llama_build_and_execute_mtp_graph(ctx, batch, id_last, n_past, last_tok_idx);
+    return llama_build_and_execute_mtp_graph(ctx, batch, id_last, n_past, last_tok_idx);
     //LOG_INF("updating kv cache for n_past: %d\n", n_past);
 
+    /*
     if (!smpl) {
         return -1;
     }
@@ -405,6 +406,7 @@ llama_token mtp_speculative_gen_draft(
         const llama_token id = cur_p->data[0].id;
         return id;
     }
+    */
     // LOG_INF("cur_p->size: %d\n", cur_p->size);
 
 

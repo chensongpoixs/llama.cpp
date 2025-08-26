@@ -2995,7 +2995,7 @@ void llama_opt_epoch(
         callback_eval);
 }
 
-void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+llama_token llama_build_and_execute_mtp_graph(struct llama_context * ctx,
     const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
 
     const auto * model = llama_get_model(ctx);
@@ -3044,13 +3044,29 @@ void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
 
     ggml_backend_sched_graph_compute(sched, gf); // execute the graph
 
-    struct ggml_tensor * logits_mtp = res_mtp->get_logits();;
+    //struct ggml_tensor * logits_mtp = res_mtp->get_logits();
+
     //LLAMA_LOG_INFO("logits_mtp pointer address: %p\n", (void*)logits_mtp);
 
-    if (logits_mtp) {
-        ctx->set_logits_ith(logits_mtp, sched, last_tok_idx);
-    }
+    //if (logits_mtp) {
+    //    ctx->set_logits_ith(logits_mtp, sched, last_tok_idx);
+    //}
+    struct ggml_tensor * token_id_tensor = ggml_get_tensor(res_mtp->get_ctx(), "mtp_argmax_result");
+
+
+    llama_token token_id = 0; // The C++ variable to hold the result.
+
+    // ggml_backend_tensor_get is the function for GPU->CPU copies.
+    // We are copying a single 32-bit integer.
+    ggml_backend_tensor_get(
+        token_id_tensor,
+        &token_id,                // Pointer to our C++ variable
+        0,                        // Starting offset in bytes
+        sizeof(llama_token)       // Number of bytes to copy
+    );
 
     ggml_backend_sched_free(sched);
+
+    return token_id;
 }
 

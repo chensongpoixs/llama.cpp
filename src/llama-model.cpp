@@ -14100,6 +14100,10 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
         res->t_logits = cur;
 
         ggml_build_forward_expand(gf, res->t_logits);
+
+        struct ggml_tensor * token_id_tensor = ggml_argmax(ctx0, cur);
+        ggml_set_name(token_id_tensor, "mtp_argmax_result");
+        ggml_build_forward_expand(gf, token_id_tensor);
     }
 };
 
