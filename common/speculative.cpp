@@ -423,11 +423,18 @@ llama_token mtp_speculative_gen_draft(
 }
 
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens) {
+void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, size_t batch_start, size_t n_tokens) {
     mtp_kv_update_data token;
-    for (int i = 0; i < tokens.size(); ++i) {
+
+    if (n_tokens < 0) {
+        n_tokens = tokens.size();
+    }
+
+    for (int i = 0; i < std::min(tokens.size(), n_tokens); ++i) {
         token = tokens[i];
-        mtp_speculative_gen_draft(nullptr, ctx, token.id, token.n_past, token.tok_idx);
+        //fprintf(stderr, "updating mtp kv cache with token  (%d, %d, %d)\n", token.id, token.n_past, (int) (token.tok_idx - batch_start));
+
+        mtp_speculative_gen_draft(nullptr, ctx, token.id, token.n_past, token.tok_idx - batch_start);
     }
 
     tokens.clear();

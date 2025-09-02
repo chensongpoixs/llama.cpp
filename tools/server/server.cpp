@@ -1405,9 +1405,14 @@ struct server_slot {
     // if the context does not have a memory module then all embeddings have to be computed within a single ubatch
     // also we cannot split if the pooling would require any past tokens
     bool can_split() const {
+        //fprintf(stderr, "need_embd()            %d\n", need_embd());
+        //fprintf(stderr, "llama_get_memory(ctx)  %d\n", llama_get_memory(ctx) != nullptr);
+        //fprintf(stderr, "POOLING_TYPE check     %d\n", llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_LAST);
+
         return
             !need_embd() ||
-            (llama_get_memory(ctx) && llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_LAST);
+            (llama_get_memory(ctx) && llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_LAST) ||
+            (llama_get_memory(ctx) && llama_pooling_type(ctx) == LLAMA_POOLING_TYPE_NONE);    // this seems to save embeddings for whole batch?
     }
 
     bool can_batch_with(server_slot & other_slot) const {
@@ -3508,6 +3513,13 @@ struct server_context {
                 continue; // continue loop of n_batch
             }
 
+            for (auto & slot : slots) {
+                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
+                if (slot.has_mtp) {
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, i, n_tokens);
+               }
+            }
+
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
 
@@ -3552,9 +3564,9 @@ struct server_context {
                 common_sampler_accept(slot.smpl, id, true);
 
                 // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-                if (slot.has_mtp) {
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
-                }
+                //if (slot.has_mtp) {
+                //    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                //}
 
                 slot.n_decoded += 1;
 
