@@ -13950,6 +13950,7 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
         // For v0, let's rebuild the computational graph for every step + this mimics the vLLM impl parameterization
         llama_token last_token_id, int n_past
     ) : llm_graph_context(params) {
+
         const int64_t n_embd_head = hparams.n_embd_head_v;
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
@@ -13964,8 +13965,6 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
         //llm_graph_input_attn_no_cache * inp_attn = build_attn_inp_no_cache();//nullptr;
         auto * inp_attn = build_attn_inp_kv_unified();
 
-        ggml_tensor * cur;
-
         // get MTP embedding for last (conventionally sampled) token
         // ggml_tensor * inp_token_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
         // LLAMA_LOG_INFO("step: '%d'\n", 5641);
@@ -13979,7 +13978,7 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
 
         //ggml_tensor * inp_token_id = ggml_new_i32(ctx0, last_token_id);
         //ggml_set_no_alloc(ctx0, true);
-
+        
         ggml_tensor * token_emb = ggml_get_rows(ctx0, mtp_layer.nextn.embed_tokens, inp_token_id);
         ggml_tensor * token_emb_norm = build_norm(token_emb, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, il);
 
@@ -13994,9 +13993,7 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
 
         ggml_tensor * combined = ggml_concat(ctx0, token_emb_norm, hidden_state_norm, 0);  // torch.cat
 
-
-        cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);                            // eh_proj
-
+        ggml_tensor* cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);               // eh_proj
 
         // now proceed through last layer (skipped in main model)
         ggml_tensor * inpSA = cur;
@@ -14096,14 +14093,9 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
 
         cur = build_norm(cur, mtp_layer.nextn.shared_head_norm, NULL, LLM_NORM_RMS, il);
         cur = build_lora_mm(mtp_layer.nextn.shared_head_head, cur);
-
+        
         res->t_logits = cur;
-
         ggml_build_forward_expand(gf, res->t_logits);
-
-        struct ggml_tensor * token_id_tensor = ggml_argmax(ctx0, cur);
-        ggml_set_name(token_id_tensor, "mtp_argmax_result");
-        ggml_build_forward_expand(gf, token_id_tensor);
     }
 };
 

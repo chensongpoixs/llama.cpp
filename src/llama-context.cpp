@@ -2995,7 +2995,7 @@ void llama_opt_epoch(
         callback_eval);
 }
 
-llama_token llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
     const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
 
     const auto * model = llama_get_model(ctx);
@@ -3033,6 +3033,12 @@ llama_token llama_build_and_execute_mtp_graph(struct llama_context * ctx,
 
     auto * gf = model->build_mtp_graph(*params_mtp, last_token_id, n_past);
 
+    if (!gf) {
+        LLAMA_LOG_ERROR("%s: ERROR - The construction of the MTP graph failed (returned null).", __func__);
+        if (sched) ggml_backend_sched_free(sched);
+        return;
+    }
+
     ggml_backend_sched_reset(sched); // clear the allocation of the previous graph
     ggml_backend_sched_alloc_graph(sched, gf); // explicitly allocate the new graph but do not execute it
 
@@ -3044,29 +3050,24 @@ llama_token llama_build_and_execute_mtp_graph(struct llama_context * ctx,
 
     ggml_backend_sched_graph_compute(sched, gf); // execute the graph
 
-    //struct ggml_tensor * logits_mtp = res_mtp->get_logits();
+    struct ggml_tensor * logits_mtp = res_mtp->get_logits();
 
-    //LLAMA_LOG_INFO("logits_mtp pointer address: %p\n", (void*)logits_mtp);
-
-    //if (logits_mtp) {
-    //    ctx->set_logits_ith(logits_mtp, sched, last_tok_idx);
-    //}
-    struct ggml_tensor * token_id_tensor = ggml_get_tensor(res_mtp->get_ctx(), "mtp_argmax_result");
-
-
-    llama_token token_id = 0; // The C++ variable to hold the result.
-
-    // ggml_backend_tensor_get is the function for GPU->CPU copies.
-    // We are copying a single 32-bit integer.
-    ggml_backend_tensor_get(
-        token_id_tensor,
-        &token_id,                // Pointer to our C++ variable
-        0,                        // Starting offset in bytes
-        sizeof(llama_token)       // Number of bytes to copy
-    );
+    if (logits_mtp) {
+        float * logits_dest = ctx->get_logits_ith(last_tok_idx);
+        ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched, logits_mtp);
+        if (backend_res) {
+            // ggml_backend_tensor_get is the function for GPU->CPU copies.
+            // We are copying a single 32-bit integer.
+            ggml_backend_tensor_get(logits_mtp, 
+                                    logits_dest, // Pointer to our C++ variable
+                                    0,          // Starting offset in bytes
+                                    ggml_nbytes(logits_mtp)); // Number of bytes to copy
+        } else {
+            LLAMA_LOG_ERROR("%s: ERROR - Could not obtain the backend for the logits tensor.", __func__);
+        }
+    } else {
+        LLAMA_LOG_WARN("%s: WARNING - The MTP graph did not produce a logit tensor.", __func__);
+    }
 
     ggml_backend_sched_free(sched);
-
-    return token_id;
 }
-

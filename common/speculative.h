@@ -44,9 +44,9 @@ llama_token mtp_speculative_gen_draft(
 
 // sample up to n_draft tokens and add them to the batch using the draft model
 llama_tokens common_speculative_gen_draft(
-               struct common_speculative * spec,
-        struct common_speculative_params   params,
-                      const llama_tokens & prompt,
-                             llama_token   id_last);
+    struct common_speculative * spec,
+    struct common_speculative_params   params,
+    const llama_tokens & prompt,
+    llama_token   id_last);
 
 void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, size_t batch_start = 0, size_t n_tokens = -1);
