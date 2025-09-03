@@ -381,6 +381,14 @@ llama_token mtp_speculative_gen_draft(
 
     llama_token id = common_sampler_sample(smpl, ctx, last_tok_idx, true);
 
+    const auto * cur_p = common_sampler_get_candidates(smpl);
+    for (int k = 0; k < std::min(3, (int)cur_p->size); ++k) {
+        LOG_DBG(" - draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
+            k, 0, cur_p->data[k].id, cur_p->data[k].p, common_token_to_piece(ctx, cur_p->data[k].id).c_str());
+    }
+
+    common_sampler_accept(smpl, id, true);
+
     llama_batch_free(batch);
 
     return id;
