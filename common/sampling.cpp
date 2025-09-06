@@ -582,3 +582,7 @@ std::vector<common_sampler_type> common_sampler_types_from_chars(const std::stri
 
     return samplers;
 }
+
+void common_sampler_apply_chain(struct common_sampler * gsmpl, struct llama_token_data_array * cur_p) {
+    llama_sampler_apply(gsmpl->chain, cur_p);
+}
