@@ -1454,8 +1454,8 @@ extern "C" {
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
 
-    LLAMA_API llama_token llama_build_and_execute_mtp_graph(struct llama_context * ctx,
-        const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx);
+        LLAMA_API void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+                const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx);
 
 #ifdef __cplusplus
 }

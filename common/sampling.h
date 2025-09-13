@@ -105,3 +105,5 @@ std::vector<enum common_sampler_type> common_sampler_types_from_chars(const std:
 
 llama_sampler * llama_sampler_init_llg(const llama_vocab * vocab,
                 const char * grammar_kind, const char * grammar_data);
+
+void common_sampler_apply_chain(struct common_sampler * gsmpl, struct llama_token_data_array * cur_p);

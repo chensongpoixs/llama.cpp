@@ -370,56 +370,35 @@ llama_token mtp_speculative_gen_draft(
     int32_t n_past,
     int32_t last_tok_idx) {
 
-    llama_token token_data[] = { id_last };
-    llama_pos pos_data[] = { n_past };
-    int32_t n_seq_id_data[] = { 1 };
-    llama_seq_id seq_id_data_internal[] = { 0 };
-    llama_seq_id* seq_id_data[] = {seq_id_data_internal};
-    int8_t logits_data[] = { (int8_t) (smpl != nullptr) };
-
-    llama_batch batch = {
-        /*.n_tokens = */    1,
-        /*.token = */       token_data,
-        /*.embd = */        nullptr,
-        /*.pos = */         pos_data,
-        /*.n_seq_id = */    n_seq_id_data,
-        /*.seq_id = */      seq_id_data,
-        /*.logits = */      logits_data
-    };
-
-    return llama_build_and_execute_mtp_graph(ctx, batch, id_last, n_past, last_tok_idx);
-    //LOG_INF("updating kv cache for n_past: %d\n", n_past);
-
-    /*
     if (!smpl) {
         return -1;
     }
-    else {
-        common_sampler_sample(smpl, ctx, last_tok_idx, true);
-        const auto* cur_p = common_sampler_get_candidates(smpl);
 
-        //for (int k = 0; k < std::min(3, (int)cur_p->size); ++k) {
-        //    LOG_INF(" - draft candidate %3d, pos %3d: %6d (%8.3f) '%s'\n",
-        //        k, 0, cur_p->data[k].id, cur_p->data[k].p, common_token_to_piece(ctx, cur_p->data[k].id).c_str());
-        //}
+    llama_batch batch = llama_batch_init(1, 0, 1);
+    common_batch_add(batch, id_last, n_past, {0}, true);
 
-        const llama_token id = cur_p->data[0].id;
-        return id;
+    llama_build_and_execute_mtp_graph(ctx, batch, id_last, n_past, last_tok_idx);
+
+    const llama_model * model = llama_get_model(ctx);
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = llama_n_vocab(vocab);
+
+    llama_token_data_array * cur_p = common_sampler_get_candidates(smpl);
+
+    cur_p->size = n_vocab;
+    for (int i = 0; i < n_vocab; ++i) {
+        cur_p->data[i].id = i;
+        cur_p->data[i].logit = llama_get_logits_ith(ctx, last_tok_idx)[i];
     }
-    */
-    // LOG_INF("cur_p->size: %d\n", cur_p->size);
+    cur_p->sorted = false;
 
+    common_sampler_apply_chain(smpl, cur_p);
 
-    // add drafted token for each sequence
+    const llama_token id = cur_p->data[0].id;
 
-    // skip accepting draft token -- since we're only drafting one token this can't affect future outputs
-    // smpl will accept the token if it doesn't get rejected by main model later
-    // common_sampler_accept(smpl, id, true);
+    llama_batch_free(batch);
 
-    //llama_tokens result;
-    //result.reserve(1);
-    //result.push_back(id);
-    //return result;
+    return id;
 }
 
 
