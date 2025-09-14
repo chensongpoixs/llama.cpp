@@ -13946,54 +13946,29 @@ struct llm_build_glm4_moe : public llm_graph_context {
 };
 
 struct llm_build_glm4_moe_mtp : public llm_graph_context {
-    llm_build_glm4_moe_mtp(const llama_model & model, const llm_graph_params & params,
-        // For v0, let's rebuild the computational graph for every step + this mimics the vLLM impl parameterization
-        llama_token last_token_id, int n_past
-    ) : llm_graph_context(params) {
+    llm_build_glm4_moe_mtp(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
 
         const int64_t n_embd_head = hparams.n_embd_head_v;
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
-        // Assuming a single MTP layer at the end
         const int il = hparams.n_layer - 1;
         const auto & mtp_layer = model.layers[il];
 
-        // ggml_tensor * inp_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
-        // ggml_set_i32(inp_pos, n_past);
         ggml_tensor * inp_pos = build_inp_pos();
-
-        //llm_graph_input_attn_no_cache * inp_attn = build_attn_inp_no_cache();//nullptr;
         auto * inp_attn = build_attn_inp_kv_unified();
 
-        // get MTP embedding for last (conventionally sampled) token
-        // ggml_tensor * inp_token_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
-        // LLAMA_LOG_INFO("step: '%d'\n", 5641);
-        // ggml_set_i32(inp_token_id, last_token_id);
-        //ggml_set_no_alloc(ctx0, false);
-        //LLAMA_LOG_INFO("last token id: '%d'\n", last_token_id);
-
-        ggml_tensor * inp_token_id = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
-        ggml_set_name(inp_token_id, "mtp_token_id_input");
-        ggml_set_input(inp_token_id);
-
-        //ggml_tensor * inp_token_id = ggml_new_i32(ctx0, last_token_id);
-        //ggml_set_no_alloc(ctx0, true);
+        ggml_tensor* prev_embeddings_batch = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, model.hparams.n_embd, n_tokens);
+        ggml_set_name(prev_embeddings_batch, "mtp_prev_embeddings_batch_input");
+        ggml_set_input(prev_embeddings_batch);
         
-        ggml_tensor * token_emb = ggml_get_rows(ctx0, mtp_layer.nextn.embed_tokens, inp_token_id);
+        ggml_tensor * token_emb = build_inp_embd_mtp(mtp_layer.nextn.embed_tokens);
+
         ggml_tensor * token_emb_norm = build_norm(token_emb, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, il);
+        ggml_tensor * hidden_state_norm = build_norm(prev_embeddings_batch, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
 
-        ggml_tensor* prev_embedding_leaf = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, model.hparams.n_embd);
-        ggml_set_name(prev_embedding_leaf, "mtp_prev_embedding_input");
-        ggml_set_input(prev_embedding_leaf);
+        ggml_tensor * combined = ggml_concat(ctx0, token_emb_norm, hidden_state_norm, 0);
 
-        // vLLM l99  previous_hidden_states = self.hnorm(previous_hidden_states)
-        ggml_tensor * hidden_state_norm = build_norm(prev_embedding_leaf, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
-        //token_emb_norm = ggml_cont(ctx0, token_emb_norm);
-        //hidden_state_norm = ggml_cont(ctx0, hidden_state_norm);
-
-        ggml_tensor * combined = ggml_concat(ctx0, token_emb_norm, hidden_state_norm, 0);  // torch.cat
-
-        ggml_tensor* cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);               // eh_proj
+        ggml_tensor* cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);
 
         // now proceed through last layer (skipped in main model)
         ggml_tensor * inpSA = cur;
@@ -14090,11 +14065,11 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
             cb(cur, "ffn_out", il);
         }
         cur = ggml_add(ctx0, cur, ffn_inp);
-
         cur = build_norm(cur, mtp_layer.nextn.shared_head_norm, NULL, LLM_NORM_RMS, il);
         cur = build_lora_mm(mtp_layer.nextn.shared_head_head, cur);
-        
+
         res->t_logits = cur;
+
         ggml_build_forward_expand(gf, res->t_logits);
     }
 };
@@ -18689,14 +18664,13 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     return llm->res->get_gf();
 }
 
-ggml_cgraph * llama_model::build_mtp_graph(const llm_graph_params& params,
-    llama_token last_token_id, int n_past) const {
+ggml_cgraph * llama_model::build_mtp_graph(const llm_graph_params& params) const {
     std::unique_ptr<llm_graph_context> llm;
 
     switch (arch) {
     case LLM_ARCH_GLM4_MOE:
     {
-        llm = std::make_unique<llm_build_glm4_moe_mtp>(*this, params, last_token_id, n_past);
+        llm = std::make_unique<llm_build_glm4_moe_mtp>(*this, params);
     } break;
     default:
         GGML_ABORT("fatal error");

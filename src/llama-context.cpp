@@ -1070,6 +1070,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     };
 
     int64_t n_outputs_prev = 0;
+    const bool do_mtp_kv_update = batch_inp.update_mtp_kv;
 
     do {
         const auto & ubatch = mctx->get_ubatch();
@@ -1128,6 +1129,39 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
+
+        if (do_mtp_kv_update) {
+            LLAMA_LOG_INFO(
+                "[MTP BATCHING] Processando MTP KV update para um ubatch de %u tokens.\n", 
+                ubatch.n_tokens
+            );
+            auto res_mtp = std::make_unique<llm_graph_result>(graph_max_nodes());
+
+            auto params_mtp = mtp_graph_params(res_mtp.get(), ubatch, mctx.get());
+            ggml_backend_sched_t sched_mtp = params_mtp.sched;
+
+            auto * gf_mtp = model.build_mtp_graph(params_mtp);
+            if (gf_mtp) {
+                ggml_backend_sched_alloc_graph(sched_mtp, gf_mtp);
+
+                ggml_tensor* prev_embedding_tensor = res->get_embd();
+                ggml_tensor* embd_input_mtp = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embeddings_batch_input");
+                
+                // ggml_backend_tensor_set(embd_input_mtp, prev_embedding_tensor->data, 0, ggml_nbytes(prev_embedding_tensor));
+                ggml_backend_tensor_copy(prev_embedding_tensor, embd_input_mtp);
+
+                ggml_backend_sched_graph_compute(sched_mtp, gf_mtp);
+
+                if (ubatch.output[0]) {
+                    struct ggml_tensor * logits_mtp = res_mtp->get_logits();
+                    if (logits_mtp) {
+                        float * logits_dest = logits + n_outputs_prev * n_vocab;
+                        ggml_backend_tensor_get(logits_mtp, logits_dest, 0, ggml_nbytes(logits_mtp));
+                    }
+                }
+            }
+            ggml_backend_sched_free(sched_mtp);
+        }
 
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
@@ -2995,79 +3029,79 @@ void llama_opt_epoch(
         callback_eval);
 }
 
-void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
-    const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
+// void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+//     const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
 
-    const auto * model = llama_get_model(ctx);
+//     const auto * model = llama_get_model(ctx);
 
-    auto res_mtp = std::make_unique<llm_graph_result>(ctx->graph_max_nodes());
-    std::unique_ptr<llama_memory_context_i> mctx = ctx->mtp_memory_batch(batch_inp);
+//     auto res_mtp = std::make_unique<llm_graph_result>(ctx->graph_max_nodes());
+//     std::unique_ptr<llama_memory_context_i> mctx = ctx->mtp_memory_batch(batch_inp);
 
-    std::vector<uint32_t> idxs;
-    idxs.push_back(n_past);
-    llama_kv_cache_unified::slot_info sinfo = {
-        /*.s0   =*/ 0,
-        /*.s1   =*/ 0,
-        /*.strm =*/ { 0 },
-        /*.idxs =*/ { idxs },
-    };
-    llama_kv_cache_unified::slot_info_vec_t sinfos;
-    sinfos.push_back(sinfo);
+//     std::vector<uint32_t> idxs;
+//     idxs.push_back(n_past);
+//     llama_kv_cache_unified::slot_info sinfo = {
+//         /*.s0   =*/ 0,
+//         /*.s1   =*/ 0,
+//         /*.strm =*/ { 0 },
+//         /*.idxs =*/ { idxs },
+//     };
+//     llama_kv_cache_unified::slot_info_vec_t sinfos;
+//     sinfos.push_back(sinfo);
 
-    static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_sinfos(sinfos);
-    const auto& ubatch_mtp = mctx->get_ubatch();
+//     static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_sinfos(sinfos);
+//     const auto& ubatch_mtp = mctx->get_ubatch();
 
-    //llama_ubatch ubatch_mtp;
-    //ubatch_mtp.n_tokens = 1;
-    //ubatch_mtp.pos = &n_past;
+//     //llama_ubatch ubatch_mtp;
+//     //ubatch_mtp.n_tokens = 1;
+//     //ubatch_mtp.pos = &n_past;
 
-    auto params_mtp = std::make_unique<llm_graph_params>(ctx->mtp_graph_params(res_mtp.get(), ubatch_mtp, mctx.get()));
-    ggml_backend_sched_t sched = params_mtp->sched;
+//     auto params_mtp = std::make_unique<llm_graph_params>(ctx->mtp_graph_params(res_mtp.get(), ubatch_mtp, mctx.get()));
+//     ggml_backend_sched_t sched = params_mtp->sched;
 
-    auto * last_embd = ctx->get_embeddings_ith(last_tok_idx);
+//     auto * last_embd = ctx->get_embeddings_ith(last_tok_idx);
 
-    //if (mctx && !mctx->set_n_kv()) {
-    //    LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
-    //}
-    static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_n_kv();
+//     //if (mctx && !mctx->set_n_kv()) {
+//     //    LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
+//     //}
+//     static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_n_kv();
 
-    auto * gf = model->build_mtp_graph(*params_mtp, last_token_id, n_past);
+//     auto * gf = model->build_mtp_graph(*params_mtp);
 
-    if (!gf) {
-        LLAMA_LOG_ERROR("%s: ERROR - The construction of the MTP graph failed (returned null).", __func__);
-        if (sched) ggml_backend_sched_free(sched);
-        return;
-    }
+//     if (!gf) {
+//         LLAMA_LOG_ERROR("%s: ERROR - The construction of the MTP graph failed (returned null).", __func__);
+//         if (sched) ggml_backend_sched_free(sched);
+//         return;
+//     }
 
-    ggml_backend_sched_reset(sched); // clear the allocation of the previous graph
-    ggml_backend_sched_alloc_graph(sched, gf); // explicitly allocate the new graph but do not execute it
+//     ggml_backend_sched_reset(sched); // clear the allocation of the previous graph
+//     ggml_backend_sched_alloc_graph(sched, gf); // explicitly allocate the new graph but do not execute it
 
-    ggml_tensor * mtp_token_id_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_token_id_input");
-    ggml_backend_tensor_set(mtp_token_id_input, &last_token_id, 0, sizeof(last_token_id)); // copy data to the newly allocated graph tensors
+//     ggml_tensor * mtp_token_id_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_token_id_input");
+//     ggml_backend_tensor_set(mtp_token_id_input, &last_token_id, 0, sizeof(last_token_id)); // copy data to the newly allocated graph tensors
 
-    ggml_tensor * mtp_prev_embedding_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embedding_input");
-    ggml_backend_tensor_set(mtp_prev_embedding_input, last_embd, 0, ggml_nbytes(mtp_prev_embedding_input)); // copy data to the newly allocated graph tensors
+//     ggml_tensor * mtp_prev_embedding_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embedding_input");
+//     ggml_backend_tensor_set(mtp_prev_embedding_input, last_embd, 0, ggml_nbytes(mtp_prev_embedding_input)); // copy data to the newly allocated graph tensors
 
-    ggml_backend_sched_graph_compute(sched, gf); // execute the graph
+//     ggml_backend_sched_graph_compute(sched, gf); // execute the graph
 
-    struct ggml_tensor * logits_mtp = res_mtp->get_logits();
+//     struct ggml_tensor * logits_mtp = res_mtp->get_logits();
 
-    if (logits_mtp) {
-        float * logits_dest = ctx->get_logits_ith(last_tok_idx);
-        ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched, logits_mtp);
-        if (backend_res) {
-            // ggml_backend_tensor_get is the function for GPU->CPU copies.
-            // We are copying a single 32-bit integer.
-            ggml_backend_tensor_get(logits_mtp, 
-                                    logits_dest, // Pointer to our C++ variable
-                                    0,          // Starting offset in bytes
-                                    ggml_nbytes(logits_mtp)); // Number of bytes to copy
-        } else {
-            LLAMA_LOG_ERROR("%s: ERROR - Could not obtain the backend for the logits tensor.", __func__);
-        }
-    } else {
-        LLAMA_LOG_WARN("%s: WARNING - The MTP graph did not produce a logit tensor.", __func__);
-    }
+//     if (logits_mtp) {
+//         float * logits_dest = ctx->get_logits_ith(last_tok_idx);
+//         ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched, logits_mtp);
+//         if (backend_res) {
+//             // ggml_backend_tensor_get is the function for GPU->CPU copies.
+//             // We are copying a single 32-bit integer.
+//             ggml_backend_tensor_get(logits_mtp, 
+//                                     logits_dest, // Pointer to our C++ variable
+//                                     0,          // Starting offset in bytes
+//                                     ggml_nbytes(logits_mtp)); // Number of bytes to copy
+//         } else {
+//             LLAMA_LOG_ERROR("%s: ERROR - Could not obtain the backend for the logits tensor.", __func__);
+//         }
+//     } else {
+//         LLAMA_LOG_WARN("%s: WARNING - The MTP graph did not produce a logit tensor.", __func__);
+//     }
 
-    ggml_backend_sched_free(sched);
-}
+//     ggml_backend_sched_free(sched);
+// }

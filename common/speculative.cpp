@@ -374,47 +374,54 @@ llama_token mtp_speculative_gen_draft(
         return -1;
     }
 
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    common_batch_add(batch, id_last, n_past, {0}, true);
+    llama_batch mtp_batch = llama_batch_init(1, 0, 1);
+    common_batch_add(mtp_batch, id_last, n_past, {0}, true);
+    mtp_batch.update_mtp_kv = true;
 
-    llama_build_and_execute_mtp_graph(ctx, batch, id_last, n_past, last_tok_idx);
+    llama_decode(ctx, mtp_batch);
+    llama_batch_free(mtp_batch);
 
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int n_vocab = llama_n_vocab(vocab);
-
     llama_token_data_array * cur_p = common_sampler_get_candidates(smpl);
-
     cur_p->size = n_vocab;
     for (int i = 0; i < n_vocab; ++i) {
         cur_p->data[i].id = i;
-        cur_p->data[i].logit = llama_get_logits_ith(ctx, last_tok_idx)[i];
+        cur_p->data[i].logit = llama_get_logits_ith(ctx, 0)[i]; // TODO: check if position 0 is the right
     }
     cur_p->sorted = false;
-
     common_sampler_apply_chain(smpl, cur_p);
-
-    const llama_token id = cur_p->data[0].id;
-
-    llama_batch_free(batch);
-
-    return id;
+    
+    return cur_p->data[0].id;
 }
 
 
 void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, size_t batch_start, size_t n_tokens) {
-    mtp_kv_update_data token;
-
+    if (tokens.empty()) {
+        tokens.clear();
+        return;
+    }
     if (n_tokens < 0) {
         n_tokens = tokens.size();
     }
+    const size_t n_to_process = std::min((size_t)tokens.size(), n_tokens);
 
-    for (int i = 0; i < std::min(tokens.size(), n_tokens); ++i) {
-        token = tokens[i];
-        //fprintf(stderr, "updating mtp kv cache with token  (%d, %d, %d)\n", token.id, token.n_past, (int) (token.tok_idx - batch_start));
-
-        mtp_speculative_gen_draft(nullptr, ctx, token.id, token.n_past, token.tok_idx - batch_start);
+    LOG_DBG(
+        "[MTP BATCHING] mtp_update_kv_cache call for %zu tokens.\n", 
+        n_to_process
+    );
+    llama_batch mtp_batch = llama_batch_init(n_to_process, 0, 1);
+    
+    for (size_t i = 0; i < n_to_process; ++i) {
+        const mtp_kv_update_data& token_data = tokens[i];
+        common_batch_add(mtp_batch, token_data.id, token_data.n_past, {0}, false);
     }
 
+    mtp_batch.update_mtp_kv = true;
+
+    llama_decode(ctx, mtp_batch);
+
+    llama_batch_free(mtp_batch);
     tokens.clear();
 }

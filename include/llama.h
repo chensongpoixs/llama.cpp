@@ -230,6 +230,7 @@ extern "C" {
         int32_t      *  n_seq_id;
         llama_seq_id ** seq_id;
         int8_t       *  logits;   // TODO: rename this to "output"
+        bool update_mtp_kv; 
     } llama_batch;
 
     enum llama_model_kv_override_type {
@@ -1454,8 +1455,8 @@ extern "C" {
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
 
-        LLAMA_API void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
-                const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx);
+        // LLAMA_API void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
+        //         const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx);
 
 #ifdef __cplusplus
 }
