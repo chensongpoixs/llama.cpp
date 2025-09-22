@@ -402,6 +402,7 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
+    bool update_mtp_kv;
 
     uint32_t n_outputs;
 

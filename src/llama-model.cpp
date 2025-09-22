@@ -13787,7 +13787,8 @@ struct llm_build_glm4 : public llm_graph_context {
 };
 
 struct llm_build_glm4_moe : public llm_graph_context {
-    llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+    llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params, bool build_mtp_path)
+        : llm_graph_context(params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
 
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
@@ -13932,68 +13933,57 @@ struct llm_build_glm4_moe : public llm_graph_context {
         cur = inpL;
         cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
 
-        cb(cur, "result_norm", -1);
+        // cb(cur, "result_norm", -1);
         res->t_embd = cur;
 
-        // lm_head
-        cur = build_lora_mm(model.output, cur);
+        if (build_mtp_path) {
+            const int il_mtp = hparams.n_layer - 1;
+            const auto & mtp_layer = model.layers[il_mtp];
+                
+            ggml_tensor * mtp_logits = build_mtp_tail(mtp_layer, cur, n_embd_head);
+            res->t_logits = mtp_logits;
+        } else {
+            // lm_head
+            cur = build_lora_mm(model.output, cur);
+            res->t_logits = cur;
+        }
 
-        cb(cur, "result_output", -1);
-        res->t_logits = cur;
-
-        ggml_build_forward_expand(gf, cur);
+        ggml_build_forward_expand(gf, res->t_logits);
     }
-};
 
-struct llm_build_glm4_moe_mtp : public llm_graph_context {
-    llm_build_glm4_moe_mtp(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
-
-        const int64_t n_embd_head = hparams.n_embd_head_v;
-        GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
-
+private:
+    ggml_tensor * build_mtp_tail(const llama_layer & mtp_layer, ggml_tensor * prev_embeddings,
+        int64_t n_embd_head
+    ) {
         const int il = hparams.n_layer - 1;
-        const auto & mtp_layer = model.layers[il];
 
         ggml_tensor * inp_pos = build_inp_pos();
         auto * inp_attn = build_attn_inp_kv_unified();
-
-        ggml_tensor* prev_embeddings_batch = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, model.hparams.n_embd, n_tokens);
-        ggml_set_name(prev_embeddings_batch, "mtp_prev_embeddings_batch_input");
-        ggml_set_input(prev_embeddings_batch);
-        
         ggml_tensor * token_emb = build_inp_embd_mtp(mtp_layer.nextn.embed_tokens);
 
         ggml_tensor * token_emb_norm = build_norm(token_emb, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, il);
-        ggml_tensor * hidden_state_norm = build_norm(prev_embeddings_batch, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
-
+        ggml_tensor * hidden_state_norm = build_norm(prev_embeddings, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
+        
         ggml_tensor * combined = ggml_concat(ctx0, token_emb_norm, hidden_state_norm, 0);
-
         ggml_tensor* cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);
 
         // now proceed through last layer (skipped in main model)
         ggml_tensor * inpSA = cur;
-
         // Pre-attention norm for the MTP block
-        ggml_tensor* attn_inp = build_norm(cur, mtp_layer.attn_norm, NULL, LLM_NORM_RMS, il);
+        cur = build_norm(cur, mtp_layer.attn_norm, NULL, LLM_NORM_RMS, il);
 
         // self-attention
         {
             ggml_tensor * Qcur = build_lora_mm(mtp_layer.wq, cur);
-            if (mtp_layer.bq) {
-                Qcur = ggml_add(ctx0, Qcur, mtp_layer.bq);
-            }
+            if (mtp_layer.bq) Qcur = ggml_add(ctx0, Qcur, mtp_layer.bq);
             cb(Qcur, "Qcur", il);
 
             ggml_tensor * Kcur = build_lora_mm(mtp_layer.wk, cur);
-            if (mtp_layer.bk) {
-                Kcur = ggml_add(ctx0, Kcur, mtp_layer.bk);
-            }
+            if (mtp_layer.bk) Kcur = ggml_add(ctx0, Kcur, mtp_layer.bk);
             cb(Kcur, "Kcur", il);
 
             ggml_tensor * Vcur = build_lora_mm(mtp_layer.wv, cur);
-            if (mtp_layer.bv) {
-                Vcur = ggml_add(ctx0, Vcur, mtp_layer.bv);
-            }
+            if (mtp_layer.bv) Vcur = ggml_add(ctx0, Vcur, mtp_layer.bv);
             cb(Vcur, "Vcur", il);
 
             Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
@@ -14025,10 +14015,10 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
             cb(Qcur, "Qcur", il);
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
-
+            
             cur = build_attn(inp_attn,
-                    mtp_layer.wo, NULL,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                     mtp_layer.wo, NULL,
+                     Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
         }
 
         ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
@@ -14068,9 +14058,7 @@ struct llm_build_glm4_moe_mtp : public llm_graph_context {
         cur = build_norm(cur, mtp_layer.nextn.shared_head_norm, NULL, LLM_NORM_RMS, il);
         cur = build_lora_mm(mtp_layer.nextn.shared_head_head, cur);
 
-        res->t_logits = cur;
-
-        ggml_build_forward_expand(gf, res->t_logits);
+        return cur; 
     }
 };
 
@@ -18299,7 +18287,11 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 }
 
 ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
+    const int64_t t_start_us = ggml_time_us();
+    
     std::unique_ptr<llm_graph_context> llm;
+
+    const bool build_mtp = params.update_mtp_kv;
 
     switch (arch) {
         case LLM_ARCH_LLAMA:
@@ -18519,7 +18511,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             } break;
         case LLM_ARCH_GLM4_MOE:
             {
-                llm = std::make_unique<llm_build_glm4_moe>(*this, params);
+                llm = std::make_unique<llm_build_glm4_moe>(*this, params, build_mtp);
             } break;
         case LLM_ARCH_BITNET:
             {
@@ -18660,22 +18652,12 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
 
     // add on pooling layer
     llm->build_pooling(cls, cls_b, cls_out, cls_out_b);
-
-    return llm->res->get_gf();
-}
-
-ggml_cgraph * llama_model::build_mtp_graph(const llm_graph_params& params) const {
-    std::unique_ptr<llm_graph_context> llm;
-
-    switch (arch) {
-    case LLM_ARCH_GLM4_MOE:
-    {
-        llm = std::make_unique<llm_build_glm4_moe_mtp>(*this, params);
-    } break;
-    default:
-        GGML_ABORT("fatal error");
-    }
-
+    const int64_t t_end_us = ggml_time_us(); // Fim do cronômetro
+    LLAMA_LOG_INFO(
+        "[PERF] Graph build time: %.2f ms (MTP path: %s)\n",
+        (t_end_us - t_start_us) / 1000.0,
+        build_mtp ? "yes" : "no"
+    );
     return llm->res->get_gf();
 }
 

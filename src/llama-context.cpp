@@ -729,7 +729,8 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret,
+                                                bool do_mtp_kv_update) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -741,7 +742,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const auto gparams = graph_params(res, ubatch, mctx, gtype, do_mtp_kv_update);
 
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
@@ -781,7 +782,15 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    const int64_t t_exec_start_us = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    const int64_t t_exec_end_us = ggml_time_us();
+    LLAMA_LOG_INFO(
+        "[PERF] Graph compute time: %.2f ms (ubatch_size: %u, MTP path: %s)\n",
+        (t_exec_end_us - t_exec_start_us) / 1000.0,
+        ubatch.n_tokens,
+        do_mtp_kv_update ? "yes" : "no"
+    );
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -850,7 +859,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     cparams.causal_attn = false;
 
     ggml_status status;
-    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status);
+    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, false);
 
     cparams.causal_attn = causal_attn_org;
 
@@ -1092,7 +1101,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
 
         ggml_status status;
-        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status);
+        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update);
 
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
@@ -1129,39 +1138,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
-
-        if (do_mtp_kv_update) {
-            LLAMA_LOG_INFO(
-                "[MTP BATCHING] Processando MTP KV update para um ubatch de %u tokens.\n", 
-                ubatch.n_tokens
-            );
-            auto res_mtp = std::make_unique<llm_graph_result>(graph_max_nodes());
-
-            auto params_mtp = mtp_graph_params(res_mtp.get(), ubatch, mctx.get());
-            ggml_backend_sched_t sched_mtp = params_mtp.sched;
-
-            auto * gf_mtp = model.build_mtp_graph(params_mtp);
-            if (gf_mtp) {
-                ggml_backend_sched_alloc_graph(sched_mtp, gf_mtp);
-
-                ggml_tensor* prev_embedding_tensor = res->get_embd();
-                ggml_tensor* embd_input_mtp = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embeddings_batch_input");
-                
-                // ggml_backend_tensor_set(embd_input_mtp, prev_embedding_tensor->data, 0, ggml_nbytes(prev_embedding_tensor));
-                ggml_backend_tensor_copy(prev_embedding_tensor, embd_input_mtp);
-
-                ggml_backend_sched_graph_compute(sched_mtp, gf_mtp);
-
-                if (ubatch.output[0]) {
-                    struct ggml_tensor * logits_mtp = res_mtp->get_logits();
-                    if (logits_mtp) {
-                        float * logits_dest = logits + n_outputs_prev * n_vocab;
-                        ggml_backend_tensor_get(logits_mtp, logits_dest, 0, ggml_nbytes(logits_mtp));
-                    }
-                }
-            }
-            ggml_backend_sched_free(sched_mtp);
-        }
 
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
@@ -1442,7 +1418,7 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 
     auto * res = gf_res_reserve.get();
 
-    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT);
+    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT, false);
 
     res->reset();
 
@@ -1462,8 +1438,9 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 llm_graph_params llama_context::graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
-            const llama_memory_context_i * mctx,
-            llm_graph_type   gtype) const {
+                        const llama_memory_context_i * mctx,
+                        llm_graph_type   gtype,
+                        bool update_mtp_kv) const {
     return {
         /*.arch        =*/ model.arch,
         /*.hparams     =*/ model.hparams,
@@ -1476,32 +1453,9 @@ llm_graph_params llama_context::graph_params(
         /*.loras       =*/ &loras,
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
+        /*.update_mtp_kv =*/ update_mtp_kv,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
-        /*.res         =*/ res,
-    };
-}
-
-llm_graph_params llama_context::mtp_graph_params(
-    llm_graph_result * res,
-    const llama_ubatch& ubatch,
-    const llama_memory_context_i * mctx) {
-    size_t n_nodes = std::max<uint32_t>(1024u, 8u * 8u * (((model.hparams.nextn_predict_layers + 1) * model.n_tensors()) / model.hparams.n_layer));
-    ggml_backend_sched_t temp_sched = create_temp_scheduler(n_nodes);
-    return {
-        /*.arch        =*/ model.arch,
-        /*.hparams     =*/ model.hparams,
-        /*.cparams     =*/ cparams,
-        /*.ubatch      =*/ ubatch,
-        /*.gtype       =*/ LLM_GRAPH_TYPE_DECODER,
-        /*.sched       =*/ temp_sched,
-        /*.backend_cpu =*/ backend_cpu,
-        /*.cvec        =*/ &cvec,
-        /*.loras       =*/ &loras,
-        /*.mctx        =*/ mctx,
-        /*.cross       =*/ &cross,
-        /*.n_outputs   =*/ 1,
-        /*.cb          =*/ graph_get_cb(temp_sched),
         /*.res         =*/ res,
     };
 }
@@ -2240,7 +2194,7 @@ void llama_context::opt_epoch_iter(
 
             auto * res = gf_res_prev.get();
 
-            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT);
+            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT, false);
 
             res->reset();
 

@@ -1739,7 +1739,7 @@ struct server_queue {
 
         while (true) {
             QUE_DBG("%s", "processing new tasks\n");
-
+            const int64_t t_turn_start_us = ggml_time_us();
             while (true) {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
                 if (!running) {
@@ -1762,7 +1762,11 @@ struct server_queue {
             QUE_DBG("%s", "update slots\n");
 
             callback_update_slots();
-
+            const int64_t t_turn_end_us = ggml_time_us();
+            SRV_DBG(
+                "[PERF] Server turn time: %.2f ms\n",
+                (t_turn_end_us - t_turn_start_us) / 1000.0
+            );
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
