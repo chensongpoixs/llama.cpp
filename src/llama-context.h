@@ -61,6 +61,8 @@ struct llama_context {
     float * get_embeddings_seq(llama_seq_id seq_id);
     ggml_tensor * get_embeddings_tensor();
 
+    const float * draft_input_hidden_state = nullptr;
+
     void attach_threadpool(
             ggml_threadpool_t threadpool,
             ggml_threadpool_t threadpool_batch);
@@ -100,7 +102,8 @@ struct llama_context {
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
                        ggml_status & ret,
-                const bool do_mtp_kv_update);
+                const bool do_mtp_kv_update,
+                const bool use_mtp_head);
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
@@ -213,7 +216,8 @@ private:
                       const llama_ubatch & ubatch,
             const llama_memory_context_i * mctx,
                           llm_graph_type   gtype,
-                           bool update_mtp_kv) const;
+                           bool update_mtp_kv,
+                           bool use_mtp_head) const;
 
     llm_graph_cb graph_get_cb(ggml_backend_sched * sched_override = nullptr) const;
 

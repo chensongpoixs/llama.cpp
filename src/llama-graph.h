@@ -29,6 +29,7 @@ enum llm_graph_type {
     LLM_GRAPH_TYPE_DEFAULT,
     LLM_GRAPH_TYPE_ENCODER,
     LLM_GRAPH_TYPE_DECODER,
+    LLM_GRAPH_TYPE_DRAFT,
 };
 
 enum llm_ffn_op_type {
@@ -93,6 +94,20 @@ public:
 };
 
 using llm_graph_input_ptr = std::unique_ptr<llm_graph_input_i>;
+
+class llm_graph_input_mtp_states : public llm_graph_input_i {
+public:
+    llm_graph_input_mtp_states()          = default;
+    virtual ~llm_graph_input_mtp_states() = default;
+
+    void set_input(const llama_ubatch * /*ubatch*/) override {}
+
+    bool can_reuse(const llm_graph_params & /*params*/) override {
+        return true;
+    }
+
+    ggml_tensor * states = nullptr;
+};
 
 class llm_graph_input_embd : public llm_graph_input_i {
 public:
@@ -403,6 +418,7 @@ struct llm_graph_params {
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
     bool update_mtp_kv;
+    bool use_mtp_head;
 
     uint32_t n_outputs;
 
@@ -451,6 +467,8 @@ struct llm_graph_params {
             cvec      == other.cvec  &&
             loras     == other.loras &&
             cross     == other.cross &&
+            update_mtp_kv == other.update_mtp_kv &&
+            use_mtp_head  == other.use_mtp_head  &&
             n_outputs == other.n_outputs;
     }
 };

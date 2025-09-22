@@ -730,7 +730,7 @@ bool llama_context::apply_adapter_cvec(
 }
 
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret,
-                                                bool do_mtp_kv_update) {
+                                                bool do_mtp_kv_update, bool use_mtp_head) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -742,7 +742,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
-    const auto gparams = graph_params(res, ubatch, mctx, gtype, do_mtp_kv_update);
+    const auto gparams = graph_params(res, ubatch, mctx, gtype, do_mtp_kv_update, use_mtp_head);
 
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
@@ -773,6 +773,29 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         }
     }
 
+    if (do_mtp_kv_update || (use_mtp_head && !do_mtp_kv_update)) { // If it is any MTP operation
+        const char * target_tensor_name = "result_embd_pooled";
+        ggml_tensor* hidden_states_input = ggml_get_tensor(res->get_ctx(), target_tensor_name);
+
+        const float * source_hidden_state = nullptr;
+        if (do_mtp_kv_update) {
+            // Cache warming uses the entire embeddings buffer
+            source_hidden_state = this->embd;
+        } else {
+            // Draft generation uses the specific state
+            source_hidden_state = this->draft_input_hidden_state;
+        }
+
+        if (source_hidden_state != nullptr && hidden_states_input != nullptr) {
+            ggml_backend_tensor_set(hidden_states_input, source_hidden_state, 0, ggml_nbytes(hidden_states_input));
+        } else {
+            LLAMA_LOG_ERROR("%s: MTP hidden state input tensor ('%s') not found or main embd buffer is null\n",
+                __func__, target_tensor_name);
+            ret = GGML_STATUS_FAILED;
+            return nullptr;
+        }
+    }
+
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
@@ -798,7 +821,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     ret = GGML_STATUS_SUCCESS;
-
+    if (do_mtp_kv_update || use_mtp_head) {
+        ggml_tensor * sum_tensor = ggml_get_tensor(res->get_ctx(), "mtp_input_sum");
+        if (sum_tensor) {
+            LLAMA_LOG_WARN("[DEBUG-SUM] MTP input sum node successfully created.\n");
+        }
+    }
     return res;
 }
 
@@ -859,7 +887,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     cparams.causal_attn = false;
 
     ggml_status status;
-    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, false);
+    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, false, false);
 
     cparams.causal_attn = causal_attn_org;
 
@@ -972,6 +1000,10 @@ int llama_context::encode(const llama_batch & batch_inp) {
 
 int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
+    LLAMA_LOG_WARN("[DEBUG-DECODE-ENTRY] Entering llama_decode. update_mtp_kv=%s, use_mtp_head=%s\n",
+        batch_inp.update_mtp_kv ? "true" : "false",
+        batch_inp.use_mtp_head ? "true" : "false"
+    );
 
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
@@ -1080,9 +1112,24 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     int64_t n_outputs_prev = 0;
     const bool do_mtp_kv_update = batch_inp.update_mtp_kv;
-
+    const bool use_mtp_head = batch_inp.use_mtp_head;
+    const bool is_prompt_warmup = batch_inp.n_tokens > 1 && (this->model.hparams.nextn_predict_layers > 0);
+    
     do {
         const auto & ubatch = mctx->get_ubatch();
+        if (ubatch.n_tokens > 0) {
+            std::string pos_str;
+            for (uint32_t i = 0; i < std::min((uint32_t)5, ubatch.n_tokens); ++i) {
+                pos_str += std::to_string(ubatch.pos[i]) + " ";
+            }
+            LLAMA_LOG_WARN(
+                "[DEBUG-POS] ubatch_size=%u, update_mtp_kv=%s, use_mtp_head=%s. Posições: %s...\n",
+                ubatch.n_tokens,
+                batch_inp.update_mtp_kv ? "true" : "false",
+                batch_inp.use_mtp_head ? "true" : "false",
+                pos_str.c_str()
+            );
+        }
 
         // count the outputs in this ubatch
         {
@@ -1101,7 +1148,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         }
 
         ggml_status status;
-        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update);
+        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update, use_mtp_head);
 
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
@@ -1138,6 +1185,17 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //if (n_past%100 == 0) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
+
+        // if (is_prompt_warmup) {            
+        //     auto res_mtp = std::make_unique<llm_graph_result>(graph_max_nodes());
+        //     ggml_status status_mtp;
+
+        //     process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status_mtp, do_mtp_kv_update, use_mtp_head);
+
+        //     if (status_mtp != GGML_STATUS_SUCCESS) {
+        //         LLAMA_LOG_WARN("%s: Failure in MTP heating ubatch\n", __func__);
+        //     }
+        // }
 
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
@@ -1278,7 +1336,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // overlap with device computation.
         ggml_backend_sched_reset(sched.get());
     }
-
+    if (!do_mtp_kv_update && !use_mtp_head) {
+        LLAMA_LOG_WARN("[DEBUG-EMBD-WRITE] Main decode completed. ctx->embd (%p) now contains the hidden state for the next draft.\n", (void*)this->embd);
+    }
     return 0;
 }
 
@@ -1418,7 +1478,7 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 
     auto * res = gf_res_reserve.get();
 
-    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT, false);
+    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT, false, false);
 
     res->reset();
 
@@ -1440,7 +1500,8 @@ llm_graph_params llama_context::graph_params(
                       const llama_ubatch & ubatch,
                         const llama_memory_context_i * mctx,
                         llm_graph_type   gtype,
-                        bool update_mtp_kv) const {
+                        bool update_mtp_kv,
+                        bool use_mtp_head) const {
     return {
         /*.arch        =*/ model.arch,
         /*.hparams     =*/ model.hparams,
@@ -1454,6 +1515,7 @@ llm_graph_params llama_context::graph_params(
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
         /*.update_mtp_kv =*/ update_mtp_kv,
+        /*.use_mtp_head  =*/ use_mtp_head,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,
@@ -2194,7 +2256,7 @@ void llama_context::opt_epoch_iter(
 
             auto * res = gf_res_prev.get();
 
-            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT, false);
+            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT, false, false);
 
             res->reset();
 
@@ -2983,79 +3045,6 @@ void llama_opt_epoch(
         callback_eval);
 }
 
-// void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
-//     const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
-
-//     const auto * model = llama_get_model(ctx);
-
-//     auto res_mtp = std::make_unique<llm_graph_result>(ctx->graph_max_nodes());
-//     std::unique_ptr<llama_memory_context_i> mctx = ctx->mtp_memory_batch(batch_inp);
-
-//     std::vector<uint32_t> idxs;
-//     idxs.push_back(n_past);
-//     llama_kv_cache_unified::slot_info sinfo = {
-//         /*.s0   =*/ 0,
-//         /*.s1   =*/ 0,
-//         /*.strm =*/ { 0 },
-//         /*.idxs =*/ { idxs },
-//     };
-//     llama_kv_cache_unified::slot_info_vec_t sinfos;
-//     sinfos.push_back(sinfo);
-
-//     static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_sinfos(sinfos);
-//     const auto& ubatch_mtp = mctx->get_ubatch();
-
-//     //llama_ubatch ubatch_mtp;
-//     //ubatch_mtp.n_tokens = 1;
-//     //ubatch_mtp.pos = &n_past;
-
-//     auto params_mtp = std::make_unique<llm_graph_params>(ctx->mtp_graph_params(res_mtp.get(), ubatch_mtp, mctx.get()));
-//     ggml_backend_sched_t sched = params_mtp->sched;
-
-//     auto * last_embd = ctx->get_embeddings_ith(last_tok_idx);
-
-//     //if (mctx && !mctx->set_n_kv()) {
-//     //    LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
-//     //}
-//     static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_n_kv();
-
-//     auto * gf = model->build_mtp_graph(*params_mtp);
-
-//     if (!gf) {
-//         LLAMA_LOG_ERROR("%s: ERROR - The construction of the MTP graph failed (returned null).", __func__);
-//         if (sched) ggml_backend_sched_free(sched);
-//         return;
-//     }
-
-//     ggml_backend_sched_reset(sched); // clear the allocation of the previous graph
-//     ggml_backend_sched_alloc_graph(sched, gf); // explicitly allocate the new graph but do not execute it
-
-//     ggml_tensor * mtp_token_id_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_token_id_input");
-//     ggml_backend_tensor_set(mtp_token_id_input, &last_token_id, 0, sizeof(last_token_id)); // copy data to the newly allocated graph tensors
-
-//     ggml_tensor * mtp_prev_embedding_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embedding_input");
-//     ggml_backend_tensor_set(mtp_prev_embedding_input, last_embd, 0, ggml_nbytes(mtp_prev_embedding_input)); // copy data to the newly allocated graph tensors
-
-//     ggml_backend_sched_graph_compute(sched, gf); // execute the graph
-
-//     struct ggml_tensor * logits_mtp = res_mtp->get_logits();
-
-//     if (logits_mtp) {
-//         float * logits_dest = ctx->get_logits_ith(last_tok_idx);
-//         ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched, logits_mtp);
-//         if (backend_res) {
-//             // ggml_backend_tensor_get is the function for GPU->CPU copies.
-//             // We are copying a single 32-bit integer.
-//             ggml_backend_tensor_get(logits_mtp, 
-//                                     logits_dest, // Pointer to our C++ variable
-//                                     0,          // Starting offset in bytes
-//                                     ggml_nbytes(logits_mtp)); // Number of bytes to copy
-//         } else {
-//             LLAMA_LOG_ERROR("%s: ERROR - Could not obtain the backend for the logits tensor.", __func__);
-//         }
-//     } else {
-//         LLAMA_LOG_WARN("%s: WARNING - The MTP graph did not produce a logit tensor.", __func__);
-//     }
-
-//     ggml_backend_sched_free(sched);
-// }
+void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state) {
+    ctx->draft_input_hidden_state = hidden_state;
+}

@@ -13787,168 +13787,204 @@ struct llm_build_glm4 : public llm_graph_context {
 };
 
 struct llm_build_glm4_moe : public llm_graph_context {
-    llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params, bool build_mtp_path)
-        : llm_graph_context(params) {
+    llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
-
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
         ggml_tensor * cur;
-        ggml_tensor * inpL;
 
-        inpL = build_inp_embd(model.tok_embd);
-
-        // inp_pos - contains the positions
-        ggml_tensor * inp_pos = build_inp_pos();
-
-        auto * inp_attn = build_attn_inp_kv_unified();
-
-        ggml_tensor * inp_out_ids = build_inp_out_ids();
-
-        // Only process up to last layer (skip final NextN layer)
-        // Final layer tensors are loaded but not processed in forward pass
-        const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
-        for (int il = 0; il < n_transformer_layers; ++il) {
-            ggml_tensor * inpSA = inpL;
-
-            // Pre-attention norm
-            cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
-            cb(cur, "attn_norm", il);
-
-            // self-attention
-            {
-                ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
-                if (model.layers[il].bq) {
-                    Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
-                }
-                cb(Qcur, "Qcur", il);
-
-                ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
-                if (model.layers[il].bk) {
-                    Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
-                }
-                cb(Kcur, "Kcur", il);
-
-                ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
-                if (model.layers[il].bv) {
-                    Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
-                }
-                cb(Vcur, "Vcur", il);
-
-                Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
-                Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
-                Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
-
-                // Apply Q/K norm if available (GLM-4.5 355B variant)
-                if (model.layers[il].attn_q_norm) {
-                    Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
-                    cb(Qcur, "Qcur_normed", il);
-                }
-                if (model.layers[il].attn_k_norm) {
-                    Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
-                    cb(Kcur, "Kcur_normed", il);
-                }
-
-                Qcur = ggml_rope_ext(
-                        ctx0, Qcur, inp_pos, nullptr,
-                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                        ext_factor, attn_factor, beta_fast, beta_slow
-                        );
-
-                Kcur = ggml_rope_ext(
-                        ctx0, Kcur, inp_pos, nullptr,
-                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                        ext_factor, attn_factor, beta_fast, beta_slow
-                        );
-
-                cb(Qcur, "Qcur", il);
-                cb(Kcur, "Kcur", il);
-                cb(Vcur, "Vcur", il);
-
-                cur = build_attn(inp_attn,
-                        model.layers[il].wo, NULL,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
-            }
-
-            if (il == n_transformer_layers - 1 && inp_out_ids) {
-                cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
-                inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
-            }
-
-            ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
-            cb(ffn_inp, "ffn_inp", il);
-
-            // Post-attention norm
-            cur = build_norm(ffn_inp, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
-            cb(cur, "post_attn_norm", il);
-
-            // Check if this is a dense layer (n_layer_dense_lead=1, so layer 0 is dense)
-            if (static_cast<uint32_t>(il) < hparams.n_layer_dense_lead) {
-                // Dense FFN layer
-                cur = build_ffn(cur,
-                        model.layers[il].ffn_up,   NULL, NULL,
-                        model.layers[il].ffn_gate, NULL, NULL,
-                        model.layers[il].ffn_down, NULL, NULL,
-                        NULL,
-                        LLM_FFN_SILU, LLM_FFN_PAR, il);
-                cb(cur, "ffn_out", il);
-            } else {
-                // Process routed experts using existing MoE infrastructure
-                ggml_tensor * routed_out = build_moe_ffn(cur,
-                        model.layers[il].ffn_gate_inp,
-                        model.layers[il].ffn_up_exps,
-                        model.layers[il].ffn_gate_exps,
-                        model.layers[il].ffn_down_exps,
-                        model.layers[il].ffn_exp_probs_b,
-                        n_expert, n_expert_used,
-                        LLM_FFN_SILU, hparams.expert_weights_norm,
-                        true, hparams.expert_weights_scale,
-                        (llama_expert_gating_func_type) hparams.expert_gating_func,
-                        il);
-                cb(routed_out, "ffn_moe_out", il);
-
-                // Process shared expert on original input
-                ggml_tensor * shared_out = build_ffn(cur,
-                        model.layers[il].ffn_up_shexp,   NULL, NULL,
-                        model.layers[il].ffn_gate_shexp, NULL, NULL,
-                        model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL,
-                        LLM_FFN_SILU, LLM_FFN_PAR, il);
-                cb(shared_out, "ffn_shexp_out", il);
-
-                // Final output: routed_output + shared_output
-                cur = ggml_add(ctx0, routed_out, shared_out);
-                cb(cur, "ffn_out", il);
-            }
-
-            cur = ggml_add(ctx0, cur, ffn_inp);
-
-            cur = build_cvec(cur, il);
-            cb(cur, "l_out", il);
-
-            // input for next layer
-            inpL = cur;
+        LLAMA_LOG_WARN(
+            "[DEBUG-GRAPH-STATE] Building graph. MTP Head=%s, MTP KV Update=%s, n_tokens=%d\n",
+            params.use_mtp_head ? "true" : "false",
+            params.update_mtp_kv ? "true" : "false",
+            n_tokens
+        );
+        // for (int i = 0; i < n_tokens; ++i) {
+        //     LLAMA_LOG_WARN("  - ubatch token[%d]: ID=%d, Pos=%d\n", i, ubatch.token[i], ubatch.pos[i]);
+        // }
+        if (n_tokens > 0) {
+            LLAMA_LOG_WARN(
+                "  - ubatch tokens: [ID=%d, Pos=%d] ... [ID=%d, Pos=%d]\n",
+                ubatch.token[0], ubatch.pos[0],
+                ubatch.token[n_tokens-1], ubatch.pos[n_tokens-1]
+            );
         }
 
-        cur = inpL;
-        cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
+        if (params.use_mtp_head) {
+            ggml_tensor* hidden_states_from_main_model;
 
-        // cb(cur, "result_norm", -1);
-        res->t_embd = cur;
+            if (params.update_mtp_kv) {
+                hidden_states_from_main_model = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
+                ggml_set_name(hidden_states_from_main_model, "result_embd_pooled");
+                ggml_set_input(hidden_states_from_main_model);
 
-        if (build_mtp_path) {
-            const int il_mtp = hparams.n_layer - 1;
-            const auto & mtp_layer = model.layers[il_mtp];
-                
-            ggml_tensor * mtp_logits = build_mtp_tail(mtp_layer, cur, n_embd_head);
-            res->t_logits = mtp_logits;
+                auto inp_mtp = std::make_unique<llm_graph_input_mtp_states>();
+                inp_mtp->states = hidden_states_from_main_model;
+                res->add_input(std::move(inp_mtp));
         } else {
-            // lm_head
-            cur = build_lora_mm(model.output, cur);
-            res->t_logits = cur;
+                hidden_states_from_main_model = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, hparams.n_embd);
+                ggml_set_name(hidden_states_from_main_model, "result_embd_pooled");
+                ggml_set_input(hidden_states_from_main_model);
+
+                auto inp_mtp = std::make_unique<llm_graph_input_mtp_states>();
+                inp_mtp->states = hidden_states_from_main_model;
+                res->add_input(std::move(inp_mtp));
+        }
+        res->t_embd = hidden_states_from_main_model;
+
+        const int il_mtp = hparams.n_layer - 1;
+        const auto & mtp_layer = model.layers[il_mtp];
+        res->t_logits = build_mtp_tail(mtp_layer, hidden_states_from_main_model, n_embd_head);
+
+        } else {
+            ggml_tensor * inpL = build_inp_embd(model.tok_embd);
+            // inp_pos - contains the positions
+            ggml_tensor * inp_pos = build_inp_pos();
+            auto * inp_attn = build_attn_inp_kv_unified();
+            ggml_tensor * inp_out_ids = build_inp_out_ids();
+            
+            // Only process up to last layer (skip final NextN layer)
+            // Final layer tensors are loaded but not processed in forward pass
+            const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
+            for (int il = 0; il < n_transformer_layers; ++il) {
+                // if (params.use_mtp_head) {
+                //     LLAMA_LOG_ERROR("[DEBUG-KV-ERROR] MTP path is running the main layer %d!\n", il);
+                // } else {
+                //     LLAMA_LOG_WARN("[DEBUG-KV] Main Head Path: Accessing layer %d\n", il);
+                // }
+                ggml_tensor * inpSA = inpL;
+
+                // Pre-attention norm
+                cur = build_norm(inpL, model.layers[il].attn_norm, NULL, LLM_NORM_RMS, il);
+                cb(cur, "attn_norm", il);
+
+                // self-attention
+                {
+                    ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
+                    if (model.layers[il].bq) {
+                        Qcur = ggml_add(ctx0, Qcur, model.layers[il].bq);
+                    }
+                    cb(Qcur, "Qcur", il);
+
+                    ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
+                    if (model.layers[il].bk) {
+                        Kcur = ggml_add(ctx0, Kcur, model.layers[il].bk);
+                    }
+                    cb(Kcur, "Kcur", il);
+
+                    ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
+                    if (model.layers[il].bv) {
+                        Vcur = ggml_add(ctx0, Vcur, model.layers[il].bv);
+                    }
+                    cb(Vcur, "Vcur", il);
+
+                    Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head, n_tokens);
+                    Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
+                    Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+
+                    // Apply Q/K norm if available (GLM-4.5 355B variant)
+                    if (model.layers[il].attn_q_norm) {
+                        Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
+                        cb(Qcur, "Qcur_normed", il);
+                    }
+                    if (model.layers[il].attn_k_norm) {
+                        Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
+                        cb(Kcur, "Kcur_normed", il);
+                    }
+
+                    Qcur = ggml_rope_ext(
+                            ctx0, Qcur, inp_pos, nullptr,
+                            n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                            ext_factor, attn_factor, beta_fast, beta_slow
+                            );
+
+                    Kcur = ggml_rope_ext(
+                            ctx0, Kcur, inp_pos, nullptr,
+                            n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                            ext_factor, attn_factor, beta_fast, beta_slow
+                            );
+
+                    cb(Qcur, "Qcur", il);
+                    cb(Kcur, "Kcur", il);
+                    cb(Vcur, "Vcur", il);
+
+                    cur = build_attn(inp_attn,
+                            model.layers[il].wo, NULL,
+                            Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                }
+
+                if (il == n_transformer_layers - 1 && inp_out_ids) {
+                    cur   = ggml_get_rows(ctx0, cur, inp_out_ids);
+                    inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
+                }
+
+                ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
+                cb(ffn_inp, "ffn_inp", il);
+
+                // Post-attention norm
+                cur = build_norm(ffn_inp, model.layers[il].attn_post_norm, NULL, LLM_NORM_RMS, il);
+                cb(cur, "post_attn_norm", il);
+
+                // Check if this is a dense layer (n_layer_dense_lead=1, so layer 0 is dense)
+                if (static_cast<uint32_t>(il) < hparams.n_layer_dense_lead) {
+                    // Dense FFN layer
+                    cur = build_ffn(cur,
+                            model.layers[il].ffn_up,   NULL, NULL,
+                            model.layers[il].ffn_gate, NULL, NULL,
+                            model.layers[il].ffn_down, NULL, NULL,
+                            NULL,
+                            LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    cb(cur, "ffn_out", il);
+                } else {
+                    // Process routed experts using existing MoE infrastructure
+                    ggml_tensor * routed_out = build_moe_ffn(cur,
+                            model.layers[il].ffn_gate_inp,
+                            model.layers[il].ffn_up_exps,
+                            model.layers[il].ffn_gate_exps,
+                            model.layers[il].ffn_down_exps,
+                            model.layers[il].ffn_exp_probs_b,
+                            n_expert, n_expert_used,
+                            LLM_FFN_SILU, hparams.expert_weights_norm,
+                            true, hparams.expert_weights_scale,
+                            (llama_expert_gating_func_type) hparams.expert_gating_func,
+                            il);
+                    cb(routed_out, "ffn_moe_out", il);
+
+                    // Process shared expert on original input
+                    ggml_tensor * shared_out = build_ffn(cur,
+                            model.layers[il].ffn_up_shexp,   NULL, NULL,
+                            model.layers[il].ffn_gate_shexp, NULL, NULL,
+                            model.layers[il].ffn_down_shexp, NULL, NULL,
+                            NULL,
+                            LLM_FFN_SILU, LLM_FFN_PAR, il);
+                    cb(shared_out, "ffn_shexp_out", il);
+
+                    // Final output: routed_output + shared_output
+                    cur = ggml_add(ctx0, routed_out, shared_out);
+                    cb(cur, "ffn_out", il);
+                }
+
+                cur = ggml_add(ctx0, cur, ffn_inp);
+
+                cur = build_cvec(cur, il);
+                cb(cur, "l_out", il);
+
+                // input for next layer
+                inpL = cur;
+            }
+
+            cur = inpL;
+            cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
+
+            // cb(cur, "result_norm", -1);
+            res->t_embd = cur;
+
+        // Use the main model header
+        res->t_logits = build_lora_mm(model.output, cur);
         }
 
-        ggml_build_forward_expand(gf, res->t_logits);
+    ggml_build_forward_expand(gf, res->t_logits);
+
     }
 
 private:
@@ -13956,6 +13992,10 @@ private:
         int64_t n_embd_head
     ) {
         const int il = hparams.n_layer - 1;
+        // LLAMA_LOG_WARN("[DEBUG-KV] MTP Head Path: Accessing layer %d\n", il);
+        ggml_tensor * sum_node = ggml_sum(ctx0, prev_embeddings);
+
+        ggml_set_name(sum_node, "mtp_input_sum");
 
         ggml_tensor * inp_pos = build_inp_pos();
         auto * inp_attn = build_attn_inp_kv_unified();
@@ -14015,7 +14055,11 @@ private:
             cb(Qcur, "Qcur", il);
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
-            
+            // LLAMA_LOG_WARN("[DEBUG-MTP-ATTN] Inputs for build_attn in the layer %d:\n", il);
+            // LLAMA_LOG_WARN("  - Qcur shape: [%d, %d, %d]\n", Qcur->ne[0], Qcur->ne[1], Qcur->ne[2]);
+            // LLAMA_LOG_WARN("  - Kcur shape: [%d, %d, %d]\n", Kcur->ne[0], Kcur->ne[1], Kcur->ne[2]);
+            // LLAMA_LOG_WARN("  - Vcur shape: [%d, %d, %d]\n", Vcur->ne[0], Vcur->ne[1], Vcur->ne[2]);
+
             cur = build_attn(inp_attn,
                      mtp_layer.wo, NULL,
                      Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
@@ -18511,7 +18555,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             } break;
         case LLM_ARCH_GLM4_MOE:
             {
-                llm = std::make_unique<llm_build_glm4_moe>(*this, params, build_mtp);
+                llm = std::make_unique<llm_build_glm4_moe>(*this, params);
             } break;
         case LLM_ARCH_BITNET:
             {

@@ -3387,6 +3387,15 @@ struct server_context {
                         slot.n_prompt_tokens_processed += n_pos;
                     }
 
+                    const size_t n_to_log = slot.mtp_kv_update_batch.size();
+                    if (n_to_log > 0) {
+                        SLT_INF(slot,
+                            "DEBUG-KV-REQ Cache Warm-up: Requesting KV update for %zu tokens. Positions: %d ... %d\n",
+                            n_to_log,
+                            slot.mtp_kv_update_batch.front().n_past,
+                            slot.mtp_kv_update_batch.back().n_past
+                        );
+                    }
                     // add prompt tokens for processing in the current batch
                     while (slot.n_past < slot.n_prompt_tokens && batch.n_tokens < n_batch) {
                         // get next token to process
@@ -3517,12 +3526,12 @@ struct server_context {
                 continue; // continue loop of n_batch
             }
 
-            for (auto & slot : slots) {
-                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-                if (slot.has_mtp) {
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, i, n_tokens);
-               }
-            }
+            // for (auto & slot : slots) {
+            //     // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
+            //     if (slot.has_mtp) {
+            //         mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, i, n_tokens);
+            //    }
+            // }
 
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;

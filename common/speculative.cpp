@@ -373,10 +373,24 @@ llama_token mtp_speculative_gen_draft(
     if (!smpl) {
         return -1;
     }
-
+    const float * draft_input_hidden_state = llama_get_embeddings_ith(ctx, last_tok_idx);
+    llama_set_draft_input_hidden_state(ctx, draft_input_hidden_state);
+    
     llama_batch mtp_batch = llama_batch_init(1, 0, 1);
     common_batch_add(mtp_batch, id_last, n_past, {0}, true);
-    mtp_batch.update_mtp_kv = true;
+
+    LOG_INF(
+        "[DEBUG-DRAFT-IN] Generating draft. id_last=%d, n_past=%d, last_tok_idx=%d\n",
+        id_last, n_past, last_tok_idx
+    );
+
+    mtp_batch.update_mtp_kv = false;
+    mtp_batch.use_mtp_head  = true;
+
+    LOG_INF("[DEBUG-DRAFT-CALL] Calling llama_decode for draft. update_mtp_kv=%s, use_mtp_head=%s\n",
+        mtp_batch.update_mtp_kv ? "true" : "false",
+        mtp_batch.use_mtp_head ? "true" : "false"
+    );
 
     llama_decode(ctx, mtp_batch);
     llama_batch_free(mtp_batch);
@@ -419,6 +433,7 @@ void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_d
     }
 
     mtp_batch.update_mtp_kv = true;
+    mtp_batch.use_mtp_head  = true;
 
     llama_decode(ctx, mtp_batch);
 
