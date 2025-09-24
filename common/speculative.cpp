@@ -373,15 +373,17 @@ llama_token mtp_speculative_gen_draft(
     if (!smpl) {
         return -1;
     }
-    const float * draft_input_hidden_state = llama_get_embeddings_ith(ctx, last_tok_idx);
+    const float * draft_input_hidden_state = llama_get_embeddings_ith(ctx, -1);
     llama_set_draft_input_hidden_state(ctx, draft_input_hidden_state);
+    LOG_INF("[DEBUG-DRAFT-STATE] Main model final embd pointer: %p, State being used for draft: %p\n",
+        (void*)llama_get_embeddings(ctx), (void*)draft_input_hidden_state);
     
     llama_batch mtp_batch = llama_batch_init(1, 0, 1);
     common_batch_add(mtp_batch, id_last, n_past, {0}, true);
 
     LOG_INF(
         "[DEBUG-DRAFT-IN] Generating draft. id_last=%d, n_past=%d, last_tok_idx=%d\n",
-        id_last, n_past, last_tok_idx
+        id_last, n_past, draft_input_hidden_state
     );
 
     mtp_batch.update_mtp_kv = false;
@@ -411,15 +413,12 @@ llama_token mtp_speculative_gen_draft(
 }
 
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, size_t batch_start, size_t n_tokens) {
+void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens) {
     if (tokens.empty()) {
-        tokens.clear();
         return;
     }
-    if (n_tokens < 0) {
-        n_tokens = tokens.size();
-    }
-    const size_t n_to_process = std::min((size_t)tokens.size(), n_tokens);
+
+    const size_t n_to_process = tokens.size();
 
     LOG_DBG(
         "[MTP BATCHING] mtp_update_kv_cache call for %zu tokens.\n", 
@@ -438,5 +437,5 @@ void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_d
     llama_decode(ctx, mtp_batch);
 
     llama_batch_free(mtp_batch);
-    tokens.clear();
+    tokens.clear(); 
 }

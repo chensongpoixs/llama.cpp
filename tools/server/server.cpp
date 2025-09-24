@@ -3525,13 +3525,18 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
+            for (auto & slot : slots) {
+                if (slot.has_mtp && slot.n_past == slot.n_prompt_tokens) {
+                    SLT_INF(slot, "Prompt processing finished. Warming up MTP KV cache for %d tokens.\n", slot.n_prompt_tokens);
+                    slot.mtp_kv_update_batch.clear();
 
-            // for (auto & slot : slots) {
-            //     // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-            //     if (slot.has_mtp) {
-            //         mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, i, n_tokens);
-            //    }
-            // }
+                    for (int j = 0; j < slot.n_prompt_tokens; ++j) {
+                        slot.mtp_kv_update_batch.push_back({ slot.prompt_tokens[j], (llama_pos)j, j });
+                    }
+
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                }
+            }
 
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
@@ -3697,8 +3702,9 @@ struct server_context {
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
 
                 if (slot.has_mtp) {
+                    slot.mtp_kv_update_batch.clear();
                     for (int32_t i = 0; i < ids.size(); ++i) {
-                        slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + 1 + i, i });
+                        slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + i, i });
                     }
                     mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
                 }

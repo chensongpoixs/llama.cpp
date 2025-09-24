@@ -1146,7 +1146,14 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
         }
-
+        if (do_mtp_kv_update) {
+            LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] MTP KV Update ubatch: n_tokens=%d\n", ubatch.n_tokens);
+            std::string positions_str;
+            for (int i = 0; i < ubatch.n_tokens; ++i) {
+                positions_str += std::to_string(ubatch.pos[i]) + " ";
+            }
+            LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] Positions: %s\n", positions_str.c_str());
+        }
         ggml_status status;
         const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update, use_mtp_head);
 
