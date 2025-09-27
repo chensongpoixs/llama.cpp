@@ -49,4 +49,4 @@ llama_tokens common_speculative_gen_draft(
     const llama_tokens & prompt,
     llama_token   id_last);
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens);
+void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, const char* tag);

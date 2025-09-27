@@ -3387,14 +3387,8 @@ struct server_context {
                         slot.n_prompt_tokens_processed += n_pos;
                     }
 
-                    const size_t n_to_log = slot.mtp_kv_update_batch.size();
-                    if (n_to_log > 0) {
-                        SLT_INF(slot,
-                            "DEBUG-KV-REQ Cache Warm-up: Requesting KV update for %zu tokens. Positions: %d ... %d\n",
-                            n_to_log,
-                            slot.mtp_kv_update_batch.front().n_past,
-                            slot.mtp_kv_update_batch.back().n_past
-                        );
+                    if (slot.has_mtp) {
+                        slot.mtp_kv_update_batch.clear();
                     }
                     // add prompt tokens for processing in the current batch
                     while (slot.n_past < slot.n_prompt_tokens && batch.n_tokens < n_batch) {
@@ -3484,6 +3478,7 @@ struct server_context {
                 batch.seq_id   + i,
                 batch.logits   + i,
             };
+            LOG_INF("\n[DEBUG-CHUNK] Processing main model chunk. Batch size: %d\n", n_tokens);
 
             const int ret = llama_decode(ctx, batch_view);
 
@@ -3525,16 +3520,18 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
+            
+            // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
+            // Aquece o cache MTP para os pedaços do prompt que acabaram de ser processados.
+            // Esta lógica SÓ deve ser executada durante o processamento do prompt.
             for (auto & slot : slots) {
-                if (slot.has_mtp && slot.n_past == slot.n_prompt_tokens) {
-                    SLT_INF(slot, "Prompt processing finished. Warming up MTP KV cache for %d tokens.\n", slot.n_prompt_tokens);
-                    slot.mtp_kv_update_batch.clear();
-
-                    for (int j = 0; j < slot.n_prompt_tokens; ++j) {
-                        slot.mtp_kv_update_batch.push_back({ slot.prompt_tokens[j], (llama_pos)j, j });
-                    }
-
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                if (slot.state == SLOT_STATE_PROCESSING_PROMPT && slot.has_mtp && !slot.mtp_kv_update_batch.empty()) {
+                    SLT_INF(slot, "DEBUG-KV-REQ: Warming up MTP cache for prompt chunk of size %zu. Positions: %d ... %d\n",
+                        slot.mtp_kv_update_batch.size(),
+                        slot.mtp_kv_update_batch.front().n_past,
+                        slot.mtp_kv_update_batch.back().n_past
+                    );
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, "PROMPT_WARMUP");
                 }
             }
 
@@ -3580,11 +3577,6 @@ struct server_context {
                 slot.i_batch = -1;
 
                 common_sampler_accept(slot.smpl, id, true);
-
-                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-                //if (slot.has_mtp) {
-                //    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
-                //}
 
                 slot.n_decoded += 1;
 
@@ -3670,11 +3662,6 @@ struct server_context {
                     draft = common_speculative_gen_draft(slot.spec, params_spec, cached_text_tokens, id);
                 }
 
-                //llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
-                //llama_tokens draft;
-                //draft.reserve(1);
-                //draft.push_back(draft_id);
-
                 // ignore small drafts
                 if (slot.params.speculative.n_min > (int)draft.size()) {
                     SLT_DBG(slot, "ignoring small draft: %d < %d\n", (int)draft.size(), slot.params.speculative.n_min);
@@ -3706,7 +3693,7 @@ struct server_context {
                     for (int32_t i = 0; i < ids.size(); ++i) {
                         slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + i, i });
                     }
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, "GEN_ACCEPTED");
                 }
 
                 slot.n_past    += ids.size();

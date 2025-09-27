@@ -373,7 +373,7 @@ llama_token mtp_speculative_gen_draft(
     if (!smpl) {
         return -1;
     }
-    const float * draft_input_hidden_state = llama_get_embeddings_ith(ctx, -1);
+    const float * draft_input_hidden_state = llama_get_embeddings(ctx);
     llama_set_draft_input_hidden_state(ctx, draft_input_hidden_state);
     LOG_INF("[DEBUG-DRAFT-STATE] Main model final embd pointer: %p, State being used for draft: %p\n",
         (void*)llama_get_embeddings(ctx), (void*)draft_input_hidden_state);
@@ -413,17 +413,24 @@ llama_token mtp_speculative_gen_draft(
 }
 
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens) {
+void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, const char* tag) {
     if (tokens.empty()) {
         return;
     }
 
     const size_t n_to_process = tokens.size();
+    std::string details_str;
+    for (size_t i = 0; i < std::min((size_t)5, n_to_process); ++i) {
+        details_str += " {id: " + std::to_string(tokens[i].id) + ", pos: " + std::to_string(tokens[i].n_past) + "}";
+    }
+    LOG_INF("[MTP-UPDATE|%s] Updating %zu tokens. Details:%s ...\n", tag, n_to_process, details_str.c_str());
 
-    LOG_DBG(
-        "[MTP BATCHING] mtp_update_kv_cache call for %zu tokens.\n", 
-        n_to_process
-    );
+    // LOG_INF("[DEBUG-CHUNK] Warming up MTP model chunk. Batch size: %zu\n", n_to_process);
+    // std::string positions_str;
+    // for (size_t i = 0; i < std::min((size_t)5, n_to_process); ++i) {
+    //     positions_str += std::to_string(tokens[i].n_past) + " ";
+    // }
+    // LOG_INF("[DEBUG-CHUNK] MTP warm-up positions: %s...\n", positions_str.c_str());
     llama_batch mtp_batch = llama_batch_init(n_to_process, 0, 1);
     
     for (size_t i = 0; i < n_to_process; ++i) {

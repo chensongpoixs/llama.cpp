@@ -778,13 +778,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ggml_tensor* hidden_states_input = ggml_get_tensor(res->get_ctx(), target_tensor_name);
 
         const float * source_hidden_state = nullptr;
-        if (do_mtp_kv_update) {
-            // Cache warming uses the entire embeddings buffer
-            source_hidden_state = this->embd;
-        } else {
-            // Draft generation uses the specific state
-            source_hidden_state = this->draft_input_hidden_state;
-        }
+        source_hidden_state = this->draft_input_hidden_state;
 
         if (source_hidden_state != nullptr && hidden_states_input != nullptr) {
             ggml_backend_tensor_set(hidden_states_input, source_hidden_state, 0, ggml_nbytes(hidden_states_input));
@@ -1149,14 +1143,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
         if (do_mtp_kv_update) {
             LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] MTP KV Update ubatch: n_tokens=%d\n", ubatch.n_tokens);
             std::string positions_str;
-            for (int i = 0; i < ubatch.n_tokens; ++i) {
+            for (int i = 0; i < std::min((uint32_t)5, ubatch.n_tokens); ++i) {
                 positions_str += std::to_string(ubatch.pos[i]) + " ";
             }
-            LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] Positions: %s\n", positions_str.c_str());
+            LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] Positions: %s...\n", positions_str.c_str());
         }
         ggml_status status;
         const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update, use_mtp_head);
-
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
             llama_pos pos_min[LLAMA_MAX_SEQ];
