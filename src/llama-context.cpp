@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <numeric>
 
 //
 // llama_context
@@ -729,8 +730,19 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
+static double calculate_vector_sum(const float* vec, size_t size) {
+    if (!vec) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (size_t i = 0; i < size; ++i) {
+        sum += vec[i];
+    }
+    return sum;
+}
+
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret,
-                                                bool do_mtp_kv_update, bool use_mtp_head) {
+                                                bool do_mtp_kv_update, bool use_mtp_head, bool is_mtp_prompt_warmup) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -778,9 +790,20 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ggml_tensor* hidden_states_input = ggml_get_tensor(res->get_ctx(), target_tensor_name);
 
         const float * source_hidden_state = nullptr;
-        source_hidden_state = this->draft_input_hidden_state;
+        if (is_mtp_prompt_warmup || (do_mtp_kv_update && !is_mtp_prompt_warmup)) {
+            source_hidden_state = this->embd;
+        } else {
+            source_hidden_state = this->draft_input_hidden_state;
+        }
 
         if (source_hidden_state != nullptr && hidden_states_input != nullptr) {
+            const size_t n_embd = this->model.hparams.n_embd;
+            const size_t n_tokens_for_sum = (do_mtp_kv_update && ubatch.n_tokens > 2) ? ubatch.n_tokens : 1;
+            double input_sum = calculate_vector_sum(source_hidden_state, n_tokens_for_sum * n_embd);
+            const char * op_type = (do_mtp_kv_update) ? "MTP_UPDATE" : "DRAFT_GEN";
+
+            LLAMA_LOG_WARN("[MTP-INPUT-CHECK] Operation: %s | Input Checksum: %e\n", op_type, input_sum);
+
             ggml_backend_tensor_set(hidden_states_input, source_hidden_state, 0, ggml_nbytes(hidden_states_input));
         } else {
             LLAMA_LOG_ERROR("%s: MTP hidden state input tensor ('%s') not found or main embd buffer is null\n",
@@ -881,7 +904,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     cparams.causal_attn = false;
 
     ggml_status status;
-    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, false, false);
+    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, false, false, false);
 
     cparams.causal_attn = causal_attn_org;
 
@@ -1107,7 +1130,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     int64_t n_outputs_prev = 0;
     const bool do_mtp_kv_update = batch_inp.update_mtp_kv;
     const bool use_mtp_head = batch_inp.use_mtp_head;
-    const bool is_prompt_warmup = batch_inp.n_tokens > 1 && (this->model.hparams.nextn_predict_layers > 0);
+    const bool is_prompt_warmup = batch_inp.is_mtp_prompt_warmup;
     
     do {
         const auto & ubatch = mctx->get_ubatch();
@@ -1117,7 +1140,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 pos_str += std::to_string(ubatch.pos[i]) + " ";
             }
             LLAMA_LOG_WARN(
-                "[DEBUG-POS] ubatch_size=%u, update_mtp_kv=%s, use_mtp_head=%s. Posições: %s...\n",
+                "[DEBUG-POS] ubatch_size=%u, update_mtp_kv=%s, use_mtp_head=%s. Positions: %s...\n",
                 ubatch.n_tokens,
                 batch_inp.update_mtp_kv ? "true" : "false",
                 batch_inp.use_mtp_head ? "true" : "false",
@@ -1149,7 +1172,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
             LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] Positions: %s...\n", positions_str.c_str());
         }
         ggml_status status;
-        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update, use_mtp_head);
+        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, do_mtp_kv_update, use_mtp_head, is_prompt_warmup);
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
             llama_pos pos_min[LLAMA_MAX_SEQ];
@@ -1186,20 +1209,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
         //    ggml_graph_dump_dot(gf, NULL, "llama.dot");
         //}
 
-        // if (is_prompt_warmup) {            
-        //     auto res_mtp = std::make_unique<llm_graph_result>(graph_max_nodes());
-        //     ggml_status status_mtp;
-
-        //     process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status_mtp, do_mtp_kv_update, use_mtp_head);
-
-        //     if (status_mtp != GGML_STATUS_SUCCESS) {
-        //         LLAMA_LOG_WARN("%s: Failure in MTP heating ubatch\n", __func__);
-        //     }
-        // }
-
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
-        embd_tensor = res->get_embd();
 
         if (t_embd && res->get_embd_pooled()) {
             t_embd = res->get_embd_pooled();
@@ -1220,58 +1231,69 @@ int llama_context::decode(const llama_batch & batch_inp) {
             }
         }
 
+        if (use_mtp_head) {
+            if (t_embd != nullptr) {
+                LLAMA_LOG_ERROR("[MTP-GRAPH-BUG] The MTP graph returned an embedding tensor when it shouldn't have! This will cause corruption.\n");
+            } else {
+                LLAMA_LOG_WARN("[MTP-GRAPH-OK] The MTP graph correctly did not return an embedding tensor.\n");
+            }
+        }
+
         // extract embeddings
         if (t_embd && n_outputs > 0) {
-            ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
-            GGML_ASSERT(backend_embd != nullptr);
+            if (!use_mtp_head) {
+                ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
+                GGML_ASSERT(backend_embd != nullptr);
 
-            switch (cparams.pooling_type) {
-                case LLAMA_POOLING_TYPE_NONE:
-                    {
-                        // extract token embeddings
-                        GGML_ASSERT(embd != nullptr);
-                        float * embd_out = embd + n_outputs_prev*n_embd;
+                switch (cparams.pooling_type) {
+                    case LLAMA_POOLING_TYPE_NONE:
+                        {
+                            // extract token embeddings
+                            GGML_ASSERT(embd != nullptr);
+                            float * embd_out = embd + n_outputs_prev*n_embd;
 
-                        if (n_outputs) {
-                            GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
-                            GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
+                            if (n_outputs) {
+                                GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
+                                GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_MEAN:
+                    case LLAMA_POOLING_TYPE_CLS:
+                    case LLAMA_POOLING_TYPE_LAST:
+                        {
+                            // extract sequence embeddings (cleared before processing each batch)
+                            auto & embd_seq_out = embd_seq;
+
+                            for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                                const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
+                                const int32_t      seq_idx = ubatch.seq_idx[seq_id];
+
+                                embd_seq_out[seq_id].resize(n_embd);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_RANK:
+                        {
+                            // extract the rerank score - n_cls_out floats per sequence
+                            auto & embd_seq_out = embd_seq;
+                            const uint32_t n_cls_out = hparams.n_cls_out;
+
+                            for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                                const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
+                                const int32_t      seq_idx = ubatch.seq_idx[seq_id];
+
+                                embd_seq_out[seq_id].resize(n_cls_out);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_UNSPECIFIED:
+                        {
+                            GGML_ABORT("unknown pooling type");
                         }
-                    } break;
-                case LLAMA_POOLING_TYPE_MEAN:
-                case LLAMA_POOLING_TYPE_CLS:
-                case LLAMA_POOLING_TYPE_LAST:
-                    {
-                        // extract sequence embeddings (cleared before processing each batch)
-                        auto & embd_seq_out = embd_seq;
-
-                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
-                            const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
-                            const int32_t      seq_idx = ubatch.seq_idx[seq_id];
-
-                            embd_seq_out[seq_id].resize(n_embd);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
-                        }
-                    } break;
-                case LLAMA_POOLING_TYPE_RANK:
-                    {
-                        // extract the rerank score - n_cls_out floats per sequence
-                        auto & embd_seq_out = embd_seq;
-
-                        const uint32_t n_cls_out = hparams.n_cls_out;
-
-                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
-                            const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
-                            const int32_t      seq_idx = ubatch.seq_idx[seq_id];
-
-                            embd_seq_out[seq_id].resize(n_cls_out);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
-                        }
-                    } break;
-                case LLAMA_POOLING_TYPE_UNSPECIFIED:
-                    {
-                        GGML_ABORT("unknown pooling type");
-                    }
+                }
+            } else {
+                LLAMA_LOG_WARN("[DEBUG-EMBD-COPY] Skipping embedding buffer copy for MTP operation (use_mtp_head=true).\n");
             }
         }
 
@@ -1336,8 +1358,12 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // overlap with device computation.
         ggml_backend_sched_reset(sched.get());
     }
-    if (!do_mtp_kv_update && !use_mtp_head) {
-        LLAMA_LOG_WARN("[DEBUG-EMBD-WRITE] Main decode completed. ctx->embd (%p) now contains the hidden state for the next draft.\n", (void*)this->embd);
+
+    if (!use_mtp_head) {
+        synchronize(); 
+        const size_t n_embd = this->model.hparams.n_embd;
+        double full_buffer_sum = calculate_vector_sum(this->embd, n_outputs_all * n_embd);
+        LLAMA_LOG_WARN("[INTEGRITY-CHECK|A] After main decode. ubatch_size=%d. Checksum: %e\n", n_outputs_all, full_buffer_sum);
     }
     return 0;
 }

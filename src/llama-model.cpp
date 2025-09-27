@@ -13821,20 +13821,19 @@ struct llm_build_glm4_moe : public llm_graph_context {
                 auto inp_mtp = std::make_unique<llm_graph_input_mtp_states>();
                 inp_mtp->states = hidden_states_from_main_model;
                 res->add_input(std::move(inp_mtp));
-        } else {
-                hidden_states_from_main_model = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, hparams.n_embd);
-                ggml_set_name(hidden_states_from_main_model, "result_embd_pooled");
-                ggml_set_input(hidden_states_from_main_model);
+            } else {
+                    hidden_states_from_main_model = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, hparams.n_embd);
+                    ggml_set_name(hidden_states_from_main_model, "result_embd_pooled");
+                    ggml_set_input(hidden_states_from_main_model);
 
-                auto inp_mtp = std::make_unique<llm_graph_input_mtp_states>();
-                inp_mtp->states = hidden_states_from_main_model;
-                res->add_input(std::move(inp_mtp));
-        }
-        res->t_embd = hidden_states_from_main_model;
+                    auto inp_mtp = std::make_unique<llm_graph_input_mtp_states>();
+                    inp_mtp->states = hidden_states_from_main_model;
+                    res->add_input(std::move(inp_mtp));
+            }
 
-        const int il_mtp = hparams.n_layer - 1;
-        const auto & mtp_layer = model.layers[il_mtp];
-        res->t_logits = build_mtp_tail(mtp_layer, hidden_states_from_main_model, n_embd_head);
+            const int il_mtp = hparams.n_layer - 1;
+            const auto & mtp_layer = model.layers[il_mtp];
+            res->t_logits = build_mtp_tail(mtp_layer, hidden_states_from_main_model, n_embd_head);
 
         } else {
             ggml_tensor * inpL = build_inp_embd(model.tok_embd);
@@ -13991,9 +13990,11 @@ private:
     ggml_tensor * build_mtp_tail(const llama_layer & mtp_layer, ggml_tensor * prev_embeddings,
         int64_t n_embd_head
     ) {
+        ggml_tensor * embd_copy = ggml_dup(ctx0, prev_embeddings);
+
         const int il = hparams.n_layer - 1;
         // LLAMA_LOG_WARN("[DEBUG-KV] MTP Head Path: Accessing layer %d\n", il);
-        ggml_tensor * sum_node = ggml_sum(ctx0, prev_embeddings);
+        ggml_tensor * sum_node = ggml_sum(ctx0, embd_copy);
 
         ggml_set_name(sum_node, "mtp_input_sum");
 
@@ -14002,7 +14003,7 @@ private:
         ggml_tensor * token_emb = build_inp_embd_mtp(mtp_layer.nextn.embed_tokens);
 
         ggml_tensor * token_emb_norm = build_norm(token_emb, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, il);
-        ggml_tensor * hidden_state_norm = build_norm(prev_embeddings, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
+        ggml_tensor * hidden_state_norm = build_norm(embd_copy, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, il);
         
         ggml_tensor * combined = ggml_concat(ctx0, token_emb_norm, hidden_state_norm, 0);
         ggml_tensor* cur = build_lora_mm(mtp_layer.nextn.eh_proj, combined);
@@ -18694,13 +18695,15 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             GGML_ABORT("fatal error");
     }
 
-    // add on pooling layer
-    llm->build_pooling(cls, cls_b, cls_out, cls_out_b);
-    const int64_t t_end_us = ggml_time_us(); // Fim do cronômetro
+    if (!params.use_mtp_head) {
+        // add on pooling layer
+        llm->build_pooling(cls, cls_b, cls_out, cls_out_b);
+    }
+    const int64_t t_end_us = ggml_time_us();
     LLAMA_LOG_INFO(
         "[PERF] Graph build time: %.2f ms (MTP path: %s)\n",
         (t_end_us - t_start_us) / 1000.0,
-        build_mtp ? "yes" : "no"
+        params.use_mtp_head ? "yes" : "no"
     );
     return llm->res->get_gf();
 }

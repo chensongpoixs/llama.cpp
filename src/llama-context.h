@@ -103,7 +103,8 @@ struct llama_context {
             llama_memory_context_i * mctx,
                        ggml_status & ret,
                 const bool do_mtp_kv_update,
-                const bool use_mtp_head);
+                const bool use_mtp_head,
+                bool is_mtp_prompt_warmup);
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);

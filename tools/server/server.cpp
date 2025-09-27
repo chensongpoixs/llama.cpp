@@ -3522,8 +3522,6 @@ struct server_context {
             }
             
             // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-            // Aquece o cache MTP para os pedaços do prompt que acabaram de ser processados.
-            // Esta lógica SÓ deve ser executada durante o processamento do prompt.
             for (auto & slot : slots) {
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT && slot.has_mtp && !slot.mtp_kv_update_batch.empty()) {
                     SLT_INF(slot, "DEBUG-KV-REQ: Warming up MTP cache for prompt chunk of size %zu. Positions: %d ... %d\n",
@@ -3531,7 +3529,7 @@ struct server_context {
                         slot.mtp_kv_update_batch.front().n_past,
                         slot.mtp_kv_update_batch.back().n_past
                     );
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, "PROMPT_WARMUP");
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, true);
                 }
             }
 
@@ -3569,13 +3567,16 @@ struct server_context {
                 }
 
                 const int tok_idx = slot.i_batch - i;
-
+                // Sets the initial state for the first draft generation.
+                if (slot.has_mtp) {
+                    llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, -1));
+                }
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
                 slot.last_tok_idx = tok_idx;
                 //SRV_INF("main loop sampled token: '%s'\n", common_token_to_piece(ctx, id, true).c_str());
 
                 slot.i_batch = -1;
-
+                SLT_INF(slot, "[SAMPLER-ACCEPT] Accepting token ID %d at index %zu\n", id, i);
                 common_sampler_accept(slot.smpl, id, true);
 
                 slot.n_decoded += 1;
@@ -3647,6 +3648,7 @@ struct server_context {
 
                 llama_tokens draft;
                 if (slot.has_mtp) {
+                    SLT_INF(slot, "[POS-SYNC] Before draft gen. n_past = %d\n", slot.n_past);
                     llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
                     draft.reserve(1);
                     draft.push_back(draft_id);
@@ -3682,21 +3684,39 @@ struct server_context {
                 }
 
                 SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
-
+                SLT_INF(slot, "[POS-SYNC] Before validation decode. n_past = %d, spec_batch_size = %d\n", slot.n_past, slot.batch_spec.n_tokens);
                 llama_decode(ctx, slot.batch_spec);
+
+                const size_t n_embd = llama_n_embd(llama_get_model(ctx));
+                const size_t golden_buffer_size_in_floats = slot.batch_spec.n_tokens * n_embd;
+                const float* golden_embd_ptr = llama_get_embeddings(ctx);
+                double golden_checksum = calculate_vector_sum_double(golden_embd_ptr, golden_buffer_size_in_floats);
+                SLT_INF(slot, "[VERIFY] Golden checksum after validation: %e (size: %zu tokens)\n", golden_checksum, slot.batch_spec.n_tokens);
 
                 // the accepted tokens from the speculation
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
-
+                SLT_INF(slot, "[POS-SYNC] Tokens accepted: %zu\n", ids.size());
+                
                 if (slot.has_mtp) {
+                    llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
+
+                    const float* embd_after_draft_ptr = llama_get_embeddings(ctx);
+                    double checksum_after_draft = calculate_vector_sum_double(embd_after_draft_ptr, golden_buffer_size_in_floats);
+                    SLT_INF(slot, "[VERIFY] Checksum after draft gen (should be unchanged): %e\n", checksum_after_draft);
+
                     slot.mtp_kv_update_batch.clear();
                     for (int32_t i = 0; i < ids.size(); ++i) {
                         slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + i, i });
                     }
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, "GEN_ACCEPTED");
+                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, false);
+
+                    const float* embd_after_update_ptr = llama_get_embeddings(ctx);
+                    double checksum_after_update = calculate_vector_sum_double(embd_after_update_ptr, golden_buffer_size_in_floats);
+                    SLT_INF(slot, "[VERIFY] Checksum after MTP update (should be unchanged): %e\n", checksum_after_update);
                 }
 
                 slot.n_past    += ids.size();
+                SLT_INF(slot, "[POS-SYNC] After n_past update. New n_past = %d\n", slot.n_past);
                 slot.n_decoded += ids.size();
 
                 // update how many tokens out of those tested were accepted

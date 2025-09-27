@@ -232,6 +232,7 @@ extern "C" {
         int8_t       *  logits;   // TODO: rename this to "output"
         bool            update_mtp_kv; 
         bool            use_mtp_head;
+        bool            is_mtp_prompt_warmup;
     } llama_batch;
 
     enum llama_model_kv_override_type {

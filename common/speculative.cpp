@@ -373,18 +373,8 @@ llama_token mtp_speculative_gen_draft(
     if (!smpl) {
         return -1;
     }
-    const float * draft_input_hidden_state = llama_get_embeddings(ctx);
-    llama_set_draft_input_hidden_state(ctx, draft_input_hidden_state);
-    LOG_INF("[DEBUG-DRAFT-STATE] Main model final embd pointer: %p, State being used for draft: %p\n",
-        (void*)llama_get_embeddings(ctx), (void*)draft_input_hidden_state);
-    
     llama_batch mtp_batch = llama_batch_init(1, 0, 1);
     common_batch_add(mtp_batch, id_last, n_past, {0}, true);
-
-    LOG_INF(
-        "[DEBUG-DRAFT-IN] Generating draft. id_last=%d, n_past=%d, last_tok_idx=%d\n",
-        id_last, n_past, draft_input_hidden_state
-    );
 
     mtp_batch.update_mtp_kv = false;
     mtp_batch.use_mtp_head  = true;
@@ -413,7 +403,9 @@ llama_token mtp_speculative_gen_draft(
 }
 
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, const char* tag) {
+void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, 
+                        bool is_prompt_warmup) {
+
     if (tokens.empty()) {
         return;
     }
@@ -423,26 +415,34 @@ void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_d
     for (size_t i = 0; i < std::min((size_t)5, n_to_process); ++i) {
         details_str += " {id: " + std::to_string(tokens[i].id) + ", pos: " + std::to_string(tokens[i].n_past) + "}";
     }
-    LOG_INF("[MTP-UPDATE|%s] Updating %zu tokens. Details:%s ...\n", tag, n_to_process, details_str.c_str());
+    LOG_INF("[MTP-UPDATE|%s] Updating %zu tokens. Details:%s ...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", n_to_process, details_str.c_str());
 
-    // LOG_INF("[DEBUG-CHUNK] Warming up MTP model chunk. Batch size: %zu\n", n_to_process);
-    // std::string positions_str;
-    // for (size_t i = 0; i < std::min((size_t)5, n_to_process); ++i) {
-    //     positions_str += std::to_string(tokens[i].n_past) + " ";
-    // }
-    // LOG_INF("[DEBUG-CHUNK] MTP warm-up positions: %s...\n", positions_str.c_str());
     llama_batch mtp_batch = llama_batch_init(n_to_process, 0, 1);
     
     for (size_t i = 0; i < n_to_process; ++i) {
         const mtp_kv_update_data& token_data = tokens[i];
+        // Check seq_id {0}, it may be a problem with multiple sequences.
         common_batch_add(mtp_batch, token_data.id, token_data.n_past, {0}, false);
     }
 
     mtp_batch.update_mtp_kv = true;
     mtp_batch.use_mtp_head  = true;
+    mtp_batch.is_mtp_prompt_warmup = is_prompt_warmup;
 
     llama_decode(ctx, mtp_batch);
 
     llama_batch_free(mtp_batch);
     tokens.clear(); 
+}
+
+// Debug function - It will be removed later
+double calculate_vector_sum_double(const float* vec, size_t size) {
+    if (!vec) {
+        return 0.0;
+    }
+    double sum = 0.0;
+    for (size_t i = 0; i < size; ++i) {
+        sum += vec[i];
+    }
+    return sum;
 }
