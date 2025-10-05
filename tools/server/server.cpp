@@ -1296,7 +1296,6 @@ struct server_slot {
 
     common_speculative * spec = nullptr;
     bool has_mtp = false;
-    std::vector<mtp_kv_update_data> mtp_kv_update_batch;
     int32_t last_tok_idx = -1;
 
     std::vector<common_adapter_lora_info> lora;
@@ -3387,9 +3386,6 @@ struct server_context {
                         slot.n_prompt_tokens_processed += n_pos;
                     }
 
-                    if (slot.has_mtp) {
-                        slot.mtp_kv_update_batch.clear();
-                    }
                     // add prompt tokens for processing in the current batch
                     while (slot.n_past < slot.n_prompt_tokens && batch.n_tokens < n_batch) {
                         // get next token to process
@@ -3401,9 +3397,6 @@ struct server_context {
                         // embedding requires all tokens in the batch to be output
                         const bool need_embd = server_task_type_need_embd(slot.task_type);
 
-                        if (slot.has_mtp) {
-                            slot.mtp_kv_update_batch.push_back({ cur_tok, slot.n_past, batch.n_tokens });
-                        }
                         common_batch_add(batch, cur_tok, slot.n_past, { slot.id }, need_embd);
 
                         slot.cache_tokens.push_back(cur_tok);
@@ -3520,19 +3513,17 @@ struct server_context {
 
                 continue; // continue loop of n_batch
             }
-            
-            // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-            for (auto & slot : slots) {
-                if (slot.state == SLOT_STATE_PROCESSING_PROMPT && slot.has_mtp && !slot.mtp_kv_update_batch.empty()) {
-                    SLT_INF(slot, "DEBUG-KV-REQ: Warming up MTP cache for prompt chunk of size %zu. Positions: %d ... %d\n",
-                        slot.mtp_kv_update_batch.size(),
-                        slot.mtp_kv_update_batch.front().n_past,
-                        slot.mtp_kv_update_batch.back().n_past
-                    );
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, true);
+
+            bool needs_mtp_warmup = false;
+            if (slot_batched && slot_batched->has_mtp) {
+                if (slot_batched->state == SLOT_STATE_PROCESSING_PROMPT || slot_batched->state == SLOT_STATE_DONE_PROMPT) {
+                    needs_mtp_warmup = true;
                 }
             }
 
+            if (needs_mtp_warmup) {
+                mtp_update_kv_cache(ctx, batch_view, true);
+            }
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
 
@@ -3704,12 +3695,17 @@ struct server_context {
                     double checksum_after_draft = calculate_vector_sum_double(embd_after_draft_ptr, golden_buffer_size_in_floats);
                     SLT_INF(slot, "[VERIFY] Checksum after draft gen (should be unchanged): %e\n", checksum_after_draft);
 
-                    slot.mtp_kv_update_batch.clear();
-                    for (int32_t i = 0; i < ids.size(); ++i) {
-                        slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + i, i });
-                    }
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, false);
+                    if (!ids.empty()) {
+                        llama_batch accepted_batch = llama_batch_init(ids.size(), 0, 1);
 
+                        for (size_t i = 0; i < ids.size(); ++i) {
+                            common_batch_add(accepted_batch, ids[i], slot.n_past + i, { slot.id }, false);
+                        }
+
+                        mtp_update_kv_cache(ctx, accepted_batch, false);
+
+                        llama_batch_free(accepted_batch);
+                    }
                     const float* embd_after_update_ptr = llama_get_embeddings(ctx);
                     double checksum_after_update = calculate_vector_sum_double(embd_after_update_ptr, golden_buffer_size_in_floats);
                     SLT_INF(slot, "[VERIFY] Checksum after MTP update (should be unchanged): %e\n", checksum_after_update);

@@ -403,36 +403,23 @@ llama_token mtp_speculative_gen_draft(
 }
 
 
-void mtp_update_kv_cache(struct llama_context * ctx, std::vector<mtp_kv_update_data>& tokens, 
-                        bool is_prompt_warmup) {
-
-    if (tokens.empty()) {
+void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, bool is_prompt_warmup) {
+    if (batch.n_tokens == 0) {
         return;
     }
 
-    const size_t n_to_process = tokens.size();
-    std::string details_str;
-    for (size_t i = 0; i < std::min((size_t)5, n_to_process); ++i) {
-        details_str += " {id: " + std::to_string(tokens[i].id) + ", pos: " + std::to_string(tokens[i].n_past) + "}";
-    }
-    LOG_INF("[MTP-UPDATE|%s] Updating %zu tokens. Details:%s ...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", n_to_process, details_str.c_str());
+    LOG_INF("[MTP-UPDATE|%s] Updating %d tokens...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", batch.n_tokens);
 
-    llama_batch mtp_batch = llama_batch_init(n_to_process, 0, 1);
-    
-    for (size_t i = 0; i < n_to_process; ++i) {
-        const mtp_kv_update_data& token_data = tokens[i];
-        // Check seq_id {0}, it may be a problem with multiple sequences.
-        common_batch_add(mtp_batch, token_data.id, token_data.n_past, {0}, false);
-    }
-
+    llama_batch mtp_batch = batch;
     mtp_batch.update_mtp_kv = true;
     mtp_batch.use_mtp_head  = true;
     mtp_batch.is_mtp_prompt_warmup = is_prompt_warmup;
 
-    llama_decode(ctx, mtp_batch);
+    for (int i = 0; i < mtp_batch.n_tokens; ++i) {
+        mtp_batch.logits[i] = false;
+    }
 
-    llama_batch_free(mtp_batch);
-    tokens.clear(); 
+    llama_decode(ctx, mtp_batch);
 }
 
 // Debug function - It will be removed later

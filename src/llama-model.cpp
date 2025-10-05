@@ -13788,6 +13788,13 @@ struct llm_build_glm4 : public llm_graph_context {
 
 struct llm_build_glm4_moe : public llm_graph_context {
     llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
+        LLAMA_LOG_WARN(
+            "[GRAPH_BUILD] Building graph. Path: %s, MTP_Update: %s, UBatch_Tokens: %d, First_Pos: %d\n",
+            params.use_mtp_head ? "MTP" : "MAIN",
+            params.update_mtp_kv ? "true" : "false",
+            n_tokens,
+            n_tokens > 0 ? ubatch.pos[0] : -1
+        );
         const int64_t n_embd_head = hparams.n_embd_head_v;
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
@@ -13906,7 +13913,10 @@ struct llm_build_glm4_moe : public llm_graph_context {
                     cb(Qcur, "Qcur", il);
                     cb(Kcur, "Kcur", il);
                     cb(Vcur, "Vcur", il);
-
+                    if (ubatch.n_tokens > 0) {
+                        LLAMA_LOG_WARN("[KV_WRITE] path=MAIN, layer=%d, n_tokens=%d, pos_start=%d, pos_end=%d\n",
+                            il, ubatch.n_tokens, ubatch.pos[0], ubatch.pos[ubatch.n_tokens-1]);
+                    }
                     cur = build_attn(inp_attn,
                             model.layers[il].wo, NULL,
                             Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
@@ -14060,7 +14070,10 @@ private:
             // LLAMA_LOG_WARN("  - Qcur shape: [%d, %d, %d]\n", Qcur->ne[0], Qcur->ne[1], Qcur->ne[2]);
             // LLAMA_LOG_WARN("  - Kcur shape: [%d, %d, %d]\n", Kcur->ne[0], Kcur->ne[1], Kcur->ne[2]);
             // LLAMA_LOG_WARN("  - Vcur shape: [%d, %d, %d]\n", Vcur->ne[0], Vcur->ne[1], Vcur->ne[2]);
-
+            if (ubatch.n_tokens > 0) {
+                LLAMA_LOG_WARN("[KV_WRITE] path=MTP, layer=%d, n_tokens=%d, pos_start=%d, pos_end=%d\n",
+                    il, ubatch.n_tokens, ubatch.pos[0], ubatch.pos[ubatch.n_tokens-1]);
+            }
             cur = build_attn(inp_attn,
                      mtp_layer.wo, NULL,
                      Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
