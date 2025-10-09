@@ -418,8 +418,33 @@ void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, b
     for (int i = 0; i < mtp_batch.n_tokens; ++i) {
         mtp_batch.logits[i] = false;
     }
-
     llama_decode(ctx, mtp_batch);
+}
+
+void mtp_accept_tokens(
+    struct llama_context * ctx,
+    const std::vector<llama_token> & ids,
+    int32_t n_past_base,
+    llama_seq_id seq_id
+) {
+    if (ids.empty()) {
+        return;
+    }
+
+    if (!llama_mtp_prepare_sinfo_for_update(ctx, ids.size())) {
+        return;
+    }
+
+    llama_batch accepted_batch = llama_batch_init(ids.size(), 0, 1);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        common_batch_add(accepted_batch, ids[i], n_past_base + i, { seq_id }, false);
+    }
+
+    mtp_update_kv_cache(ctx, accepted_batch, false);
+
+    llama_mtp_cancel_sinfo_update(ctx);
+
+    llama_batch_free(accepted_batch);
 }
 
 // Debug function - It will be removed later

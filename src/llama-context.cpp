@@ -18,6 +18,11 @@
 //
 // llama_context
 //
+struct llama_context_kv_cache_data {
+    llama_kv_cache_unified::slot_info_vec_t last_main_model_sinfos;
+    llama_kv_cache_unified::slot_info_vec_t resized_sinfo_for_force;
+    const llama_kv_cache_unified::slot_info_vec_t * forced_sinfos = nullptr;
+};
 
 llama_context::llama_context(
         const llama_model & model,
@@ -105,6 +110,8 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+
+    kv_cache_data = new llama_context_kv_cache_data();
 
     {
         const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
@@ -371,6 +378,7 @@ llama_context::llama_context(
 
 llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
+    delete static_cast<llama_context_kv_cache_data *>(kv_cache_data);
 }
 
 void llama_context::synchronize() {
@@ -1017,6 +1025,8 @@ int llama_context::encode(const llama_batch & batch_inp) {
 
 int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
+
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(kv_cache_data);
     LLAMA_LOG_WARN("[DEBUG-DECODE-ENTRY] Entering llama_decode. update_mtp_kv=%s, use_mtp_head=%s\n",
         batch_inp.update_mtp_kv ? "true" : "false",
         batch_inp.use_mtp_head ? "true" : "false"
@@ -1076,10 +1086,31 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // handle any pending defrags/shifts
     kv_self_update(false);
 
-    llama_memory_context_ptr mctx;
+    std::unique_ptr<llama_memory_context_i> mctx;
 
     while (true) {
-        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        if (cparams.warmup) {
+            mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        } else {
+            if (kvd->forced_sinfos && !kvd->forced_sinfos->empty()) {
+                LLAMA_LOG_WARN("[DEBUG-CACHE-REUSE] Forcing sinfos, bypassing find_slot.\n");
+
+                mctx = static_cast<llama_kv_cache_unified *>(memory.get())->init_batch_with_sinfos(
+                    *balloc, cparams.n_ubatch, *kvd->forced_sinfos, true
+                );
+            } else {
+                mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+
+                if (!batch_inp.use_mtp_head && !batch_inp.update_mtp_kv) {
+                    if (mctx && mctx->get_status() == LLAMA_MEMORY_STATUS_SUCCESS) {
+                        kvd->last_main_model_sinfos = static_cast<llama_kv_cache_unified_context *>(mctx.get())->get_sinfos();
+                    } else {
+                        kvd->last_main_model_sinfos.clear();
+                    }
+                }
+            }
+        }
+
         if (!mctx) {
             return -2;
         }
@@ -1091,29 +1122,28 @@ int llama_context::decode(const llama_batch & batch_inp) {
             case LLAMA_MEMORY_STATUS_NO_UPDATE:
                 {
                     LLAMA_LOG_ERROR("%s: unexpected memory context status: %d\n", __func__, mctx->get_status());
-
                     return -2;
                 }
             case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
                 {
+                    // if (use_last_main_model_sinfos) {
+                    //     LLAMA_LOG_ERROR("%s: Mismatch between ubatches and sinfos during reuse.\n", __func__);
+                    //     return -1;
+                    // }
+
                     if (!did_optimize) {
                         did_optimize = true;
-
                         if (kv_self_update(true)) {
                             LLAMA_LOG_DEBUG("%s: retrying batch size %d after cache optimization\n", __func__, balloc->get_n_tokens());
-
                             continue;
                         }
                     }
-
                     LLAMA_LOG_WARN("%s: failed to find a memory slot for batch of size %d\n", __func__, balloc->get_n_tokens());
-
                     return 1;
                 }
             case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
                 {
                     LLAMA_LOG_ERROR("%s: compute failed while preparing batch of size %d\n", __func__, balloc->get_n_tokens());
-
                     return -2;
                 }
         }
@@ -3073,4 +3103,27 @@ void llama_opt_epoch(
 
 void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state) {
     ctx->draft_input_hidden_state = hidden_state;
+}
+
+bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_accepted) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    const auto & last_sinfo = kvd->last_main_model_sinfos;
+
+    if (last_sinfo.empty() || last_sinfo[0].idxs.empty()) {
+        LLAMA_LOG_ERROR("%s: The sinfo for the last main call is not available.", __func__);
+        return false;
+    }
+
+    kvd->resized_sinfo_for_force = last_sinfo;
+    
+    kvd->resized_sinfo_for_force[0].idxs[0].resize(n_accepted);
+
+    kvd->forced_sinfos = &kvd->resized_sinfo_for_force;
+
+    return true;
+}
+
+void llama_mtp_cancel_sinfo_update(struct llama_context * ctx) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    kvd->forced_sinfos = nullptr;
 }

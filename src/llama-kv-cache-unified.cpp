@@ -508,6 +508,34 @@ llama_memory_context_ptr llama_kv_cache_unified::init_batch(
     return std::make_unique<llama_kv_cache_unified_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
 }
 
+llama_memory_context_ptr llama_kv_cache_unified::init_batch_with_sinfos(
+        llama_batch_allocr & balloc,
+        uint32_t n_ubatch,
+        const slot_info_vec_t & sinfos,
+        bool is_inplace_update) {
+
+    if (sinfos.empty()) {
+        return std::make_unique<llama_kv_cache_unified_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+    }
+
+    balloc.split_reset();
+    std::vector<llama_ubatch> ubatches;
+    while (true) {
+        auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true);
+        if (ubatch.n_tokens == 0) {
+            break;
+        }
+        ubatches.push_back(std::move(ubatch));
+    }
+
+    if (ubatches.size() != sinfos.size()) {
+        return std::make_unique<llama_kv_cache_unified_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+    }
+
+    return std::make_unique<llama_kv_cache_unified_context>(
+            this, sinfos, std::move(ubatches), is_inplace_update);
+}
+
 llama_memory_context_ptr llama_kv_cache_unified::init_full() {
     return std::make_unique<llama_kv_cache_unified_context>(this);
 }
@@ -738,6 +766,7 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
 }
 
 llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_ubatch & ubatch, bool cont) const {
+    LLAMA_LOG_WARN("%s: Entering find_slot for ubatch of %d tokens.\n", __func__, ubatch.n_tokens);
     if (debug > 0) {
         const auto & cells = v_cells[seq_to_stream[1]];
 
@@ -928,72 +957,95 @@ llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_
     }
 
     assert(res.s1 >= res.s0);
+    if (!res.empty()) {
+        std::string idxs_str;
+        for (const auto& vec : res.idxs) {
+            if (!vec.empty()) {
+                if (vec.size() > 8) {
+                     idxs_str += " [" + std::to_string(vec.front()) + "..." + std::to_string(vec.back()) + " (" + std::to_string(vec.size()) + " cells)]";
+                } else {
+                     idxs_str += " [";
+                     for(size_t i = 0; i < vec.size(); ++i) {
+                         idxs_str += std::to_string(vec[i]) + (i == vec.size() - 1 ? "" : ", ");
+                     }
+                     idxs_str += "]";
+                }
+            }
+        }
+        LLAMA_LOG_WARN("%s: find_slot SUCCEEDED for ubatch of %d tokens. Idxs:%s\n", __func__, ubatch.n_tokens, idxs_str.c_str());
+    } else {
+        LLAMA_LOG_ERROR("%s: find_slot FAILED to allocate cells for ubatch of %d tokens.\n", __func__, ubatch.n_tokens);
+    }
 
     return res;
 }
 
-void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch) {
-    // keep track of the max sequence position that we would overwrite with this ubatch
-    // for non-SWA cache, this would be always empty
-    llama_seq_id seq_pos_max_rm[LLAMA_MAX_SEQ];
-    for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
-        seq_pos_max_rm[s] = -1;
-    }
+void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch, bool is_inplace_update) {
+    if (!is_inplace_update) {
+        // keep track of the max sequence position that we would overwrite with this ubatch
+        // for non-SWA cache, this would be always empty
+        llama_seq_id seq_pos_max_rm[LLAMA_MAX_SEQ];
+        for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            seq_pos_max_rm[s] = -1;
+        }
 
-    assert(ubatch.n_tokens == sinfo.n_stream()*sinfo.size());
+        assert(ubatch.n_tokens == sinfo.n_stream()*sinfo.size());
 
-    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
-        for (uint32_t ii = 0; ii < sinfo.size(); ++ii) {
-            const uint32_t i = s*sinfo.size() + ii;
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            for (uint32_t ii = 0; ii < sinfo.size(); ++ii) {
+                const uint32_t i = s*sinfo.size() + ii;
 
-            auto & cells = v_cells[sinfo.strm[s]];
+                auto & cells = v_cells[sinfo.strm[s]];
 
-            const auto idx = sinfo.idxs[s][ii];
+                const auto idx = sinfo.idxs[s][ii];
 
-            if (!cells.is_empty(idx)) {
-                assert(cells.seq_count(idx) == 1);
+                if (!is_inplace_update) {
+                    if (!cells.is_empty(idx)) {
+                        assert(cells.seq_count(idx) == 1);
 
-                const llama_seq_id seq_id = cells.seq_get(idx);
-                const llama_pos    pos    = cells.pos_get(idx);
+                        const llama_seq_id seq_id = cells.seq_get(idx);
+                        const llama_pos    pos    = cells.pos_get(idx);
 
-                seq_pos_max_rm[seq_id] = std::max(seq_pos_max_rm[seq_id], pos);
+                        seq_pos_max_rm[seq_id] = std::max(seq_pos_max_rm[seq_id], pos);
 
-                cells.rm(idx);
+                        cells.rm(idx);
+                    }
+                }
+
+                cells.pos_set(idx, ubatch.pos[i]);
+
+                for (int32_t s = 0; s < ubatch.n_seq_id[i]; s++) {
+                    cells.seq_add(idx, ubatch.seq_id[i][s]);
+                }
+            }
+        }
+
+        // note: we want to preserve the invariant that all positions between [pos_min, pos_max] for each sequence
+        //       will be present in the cache. so we have to purge any position which is less than those we would overwrite
+        //       ref: https://github.com/ggml-org/llama.cpp/pull/13746#issuecomment-2916057092
+        for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            if (seq_pos_max_rm[s] == -1) {
+                continue;
             }
 
-            cells.pos_set(idx, ubatch.pos[i]);
+            GGML_ASSERT(s < seq_to_stream.size());
 
-            for (int32_t s = 0; s < ubatch.n_seq_id[i]; s++) {
-                cells.seq_add(idx, ubatch.seq_id[i][s]);
+            auto & cells = v_cells[seq_to_stream[s]];
+
+            if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
+                LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
+                        __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
+
+                seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
             }
         }
-    }
 
-    // note: we want to preserve the invariant that all positions between [pos_min, pos_max] for each sequence
-    //       will be present in the cache. so we have to purge any position which is less than those we would overwrite
-    //       ref: https://github.com/ggml-org/llama.cpp/pull/13746#issuecomment-2916057092
-    for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
-        if (seq_pos_max_rm[s] == -1) {
-            continue;
+        // move the head at the end of the slot
+        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+            auto & head = v_heads[sinfo.strm[s]];
+
+            head = sinfo.idxs[s].back() + 1;
         }
-
-        GGML_ASSERT(s < seq_to_stream.size());
-
-        auto & cells = v_cells[seq_to_stream[s]];
-
-        if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
-            LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
-                    __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
-
-            seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
-        }
-    }
-
-    // move the head at the end of the slot
-    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
-        auto & head = v_heads[sinfo.strm[s]];
-
-        head = sinfo.idxs[s].back() + 1;
     }
 }
 
@@ -2290,7 +2342,8 @@ llama_kv_cache_unified_context::llama_kv_cache_unified_context(
 llama_kv_cache_unified_context::llama_kv_cache_unified_context(
         llama_kv_cache_unified * kv,
         llama_kv_cache_unified::slot_info_vec_t sinfos,
-        std::vector<llama_ubatch> ubatches) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), sinfos(std::move(sinfos)), ubatches(std::move(ubatches)) {
+        std::vector<llama_ubatch> ubatches,
+        bool is_inplace_update) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), sinfos(std::move(sinfos)), ubatches(std::move(ubatches)), is_inplace_update(is_inplace_update) {
 }
 
 llama_kv_cache_unified_context::~llama_kv_cache_unified_context() = default;
@@ -2315,7 +2368,7 @@ bool llama_kv_cache_unified_context::apply() {
         return true;
     }
 
-    kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur]);
+    kv->apply_ubatch(sinfos[i_cur], ubatches[i_cur], is_inplace_update);
 
     n_kv = kv->get_n_kv();
 

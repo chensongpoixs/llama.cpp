@@ -3522,8 +3522,15 @@ struct server_context {
             }
 
             if (needs_mtp_warmup) {
-                mtp_update_kv_cache(ctx, batch_view, true);
+                if (llama_mtp_prepare_sinfo_for_update(ctx, batch_view.n_tokens)) {
+                    mtp_update_kv_cache(ctx, batch_view, true);
+
+                    llama_mtp_cancel_sinfo_update(ctx);
+                } else {
+                    LOG_ERR("%s: Failed to prepare the MTP symphony for warmup.", __func__);
+                }
             }
+
             // move the head of the batch forward with the number of tokens we just processed
             i_next = i + n_tokens;
 
@@ -3696,16 +3703,13 @@ struct server_context {
                     SLT_INF(slot, "[VERIFY] Checksum after draft gen (should be unchanged): %e\n", checksum_after_draft);
 
                     if (!ids.empty()) {
-                        llama_batch accepted_batch = llama_batch_init(ids.size(), 0, 1);
-
-                        for (size_t i = 0; i < ids.size(); ++i) {
-                            common_batch_add(accepted_batch, ids[i], slot.n_past + i, { slot.id }, false);
-                        }
-
-                        mtp_update_kv_cache(ctx, accepted_batch, false);
-
-                        llama_batch_free(accepted_batch);
+                        llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
+                    } else {
+                        llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, 0));
                     }
+
+                    mtp_accept_tokens(ctx, ids, slot.n_past, slot.id);
+
                     const float* embd_after_update_ptr = llama_get_embeddings(ctx);
                     double checksum_after_update = calculate_vector_sum_double(embd_after_update_ptr, golden_buffer_size_in_floats);
                     SLT_INF(slot, "[VERIFY] Checksum after MTP update (should be unchanged): %e\n", checksum_after_update);

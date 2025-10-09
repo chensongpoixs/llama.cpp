@@ -1457,7 +1457,11 @@ extern "C" {
             ggml_opt_epoch_callback   callback_train,
             ggml_opt_epoch_callback   callback_eval);
 
-        LLAMA_API void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state);
+    LLAMA_API void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state);
+
+    LLAMA_API bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_accepted);
+
+    LLAMA_API void llama_mtp_cancel_sinfo_update(struct llama_context * ctx);
 
 #ifdef __cplusplus
 }

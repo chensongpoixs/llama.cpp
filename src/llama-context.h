@@ -20,6 +20,8 @@ class llama_io_write_i;
 struct llama_memory_i;
 struct llama_memory_context_i;
 
+struct llama_context_kv_cache_data;
+
 struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
@@ -27,6 +29,11 @@ struct llama_context {
                   llama_context_params params);
 
     ~llama_context();
+    
+    llama_context(const llama_context &) = delete;
+    llama_context & operator=(const llama_context &) = delete;
+    llama_context(llama_context &&) = delete;
+    llama_context & operator=(llama_context &&) = delete;
 
     void synchronize();
 
@@ -210,6 +217,9 @@ public:
     ggml_backend_sched_t create_temp_scheduler(size_t n_nodes);
 
     std::unique_ptr<llama_memory_context_i> mtp_memory_batch(const llama_batch& batch_inp);
+
+    // For MTP KV cache cell reuse
+    void * kv_cache_data;
 
 private:
     llm_graph_params graph_params(

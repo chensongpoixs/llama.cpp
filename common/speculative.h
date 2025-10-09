@@ -51,4 +51,11 @@ llama_tokens common_speculative_gen_draft(
 
 void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, bool is_prompt_warmup);
 
+void mtp_accept_tokens(
+    struct llama_context * ctx,
+    const std::vector<llama_token> & ids,
+    int32_t n_past_base,
+    llama_seq_id seq_id
+);
+
 double calculate_vector_sum_double(const float* vec, size_t size);
