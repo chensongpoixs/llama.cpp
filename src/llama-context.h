@@ -231,6 +231,14 @@ private:
 
     llm_graph_cb graph_get_cb(ggml_backend_sched * sched_override = nullptr) const;
 
+    // Methods for MTP decode     
+    std::unique_ptr<llama_memory_context_i> initialize_decode_context(const llama_batch & batch_inp, const bool output_all);
+
+    bool prepare_mtp_graph_inputs(
+        llm_graph_result * res,
+        const llama_ubatch & ubatch,
+        const llama_mtp_params & mtp_params);
+
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);
     size_t state_read_data (llama_io_read_i  & io);
