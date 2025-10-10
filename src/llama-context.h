@@ -100,6 +100,8 @@ struct llama_context {
                 int32_t   il_start,
                 int32_t   il_end);
 
+    void kv_cache_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+
     // process a single ubatch with a specific graph type
     // if memory_context is provided, it will be applied first to the context's memory
     // ret contains the status of the graph computation

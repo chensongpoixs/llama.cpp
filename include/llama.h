@@ -1460,8 +1460,12 @@ extern "C" {
     LLAMA_API void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state);
 
     LLAMA_API bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_accepted);
-
+    
+    LLAMA_API bool llama_mtp_prepare_sinfo_for_warmup(struct llama_context * ctx);
+    
     LLAMA_API void llama_mtp_cancel_sinfo_update(struct llama_context * ctx);
+
+    LLAMA_API void llama_kv_cache_seq_rm(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 
 #ifdef __cplusplus
 }

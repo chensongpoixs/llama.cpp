@@ -3520,11 +3520,10 @@ struct server_context {
                     needs_mtp_warmup = true;
                 }
             }
-
+            
             if (needs_mtp_warmup) {
-                if (llama_mtp_prepare_sinfo_for_update(ctx, batch_view.n_tokens)) {
+                if (llama_mtp_prepare_sinfo_for_warmup(ctx)) {
                     mtp_update_kv_cache(ctx, batch_view, true);
-
                     llama_mtp_cancel_sinfo_update(ctx);
                 } else {
                     LOG_ERR("%s: Failed to prepare the MTP symphony for warmup.", __func__);

@@ -3105,6 +3105,20 @@ void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float 
     ctx->draft_input_hidden_state = hidden_state;
 }
 
+bool llama_mtp_prepare_sinfo_for_warmup(struct llama_context * ctx) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    const auto & last_sinfo = kvd->last_main_model_sinfos;
+
+    if (last_sinfo.empty()) {
+        LLAMA_LOG_ERROR("%s: The main call sinfo is not available for warmup.\n", __func__);
+        return false;
+    }
+
+    kvd->forced_sinfos = &last_sinfo;
+    return true;
+}
+
+
 bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_accepted) {
     auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
     const auto & last_sinfo = kvd->last_main_model_sinfos;
@@ -3126,4 +3140,14 @@ bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_acc
 void llama_mtp_cancel_sinfo_update(struct llama_context * ctx) {
     auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
     kvd->forced_sinfos = nullptr;
+}
+
+void llama_context::kv_cache_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (memory) {
+        static_cast<llama_kv_cache_unified *>(memory.get())->seq_rm(seq_id, p0, p1);
+    }
+}
+
+void llama_kv_cache_seq_rm(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    ctx->kv_cache_seq_rm(seq_id, p0, p1);
 }

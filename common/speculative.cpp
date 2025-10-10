@@ -374,6 +374,8 @@ llama_token mtp_speculative_gen_draft(
         return -1;
     }
     llama_batch mtp_batch = llama_batch_init(1, 0, 1);
+    const llama_pos draft_pos = n_past;
+    const llama_seq_id draft_seq_id = 0;
     common_batch_add(mtp_batch, id_last, n_past, {0}, true);
 
     mtp_batch.update_mtp_kv = false;
@@ -386,6 +388,8 @@ llama_token mtp_speculative_gen_draft(
 
     llama_decode(ctx, mtp_batch);
     llama_batch_free(mtp_batch);
+
+    llama_kv_cache_seq_rm(ctx, draft_seq_id, draft_pos, draft_pos + 1);
 
     const llama_model * model = llama_get_model(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
