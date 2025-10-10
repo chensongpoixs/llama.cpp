@@ -378,17 +378,21 @@ llama_token mtp_speculative_gen_draft(
     const llama_seq_id draft_seq_id = 0;
     common_batch_add(mtp_batch, id_last, n_past, {0}, true);
 
-    mtp_batch.update_mtp_kv = false;
-    mtp_batch.use_mtp_head  = true;
+    mtp_batch.mtp_params.op_type = MTP_OP_DRAFT_GEN;
 
-    LOG_INF("[DEBUG-DRAFT-CALL] Calling llama_decode for draft. update_mtp_kv=%s, use_mtp_head=%s\n",
-        mtp_batch.update_mtp_kv ? "true" : "false",
-        mtp_batch.use_mtp_head ? "true" : "false"
-    );
+    // LOG_INF("[DEBUG-DRAFT-CALL] Calling llama_decode for draft. update_mtp_kv=%s, use_mtp_head=%s\n",
+    //     mtp_batch.update_mtp_kv ? "true" : "false",
+    //     mtp_batch.use_mtp_head ? "true" : "false"
+    // );
 
+    // Perform the MTP draft generation decode. This writes the MTP layer's
+    // KV state for the draft token into the cache.
     llama_decode(ctx, mtp_batch);
     llama_batch_free(mtp_batch);
 
+    // CRITICAL: Purge the metadata for the draft token we just wrote.
+    // This makes the physical cell available again for the main model's validation pass,
+    // preventing a cache state corruption where two cells map to the same logical position.
     llama_kv_cache_seq_rm(ctx, draft_seq_id, draft_pos, draft_pos + 1);
 
     const llama_model * model = llama_get_model(ctx);
@@ -398,7 +402,7 @@ llama_token mtp_speculative_gen_draft(
     cur_p->size = n_vocab;
     for (int i = 0; i < n_vocab; ++i) {
         cur_p->data[i].id = i;
-        cur_p->data[i].logit = llama_get_logits_ith(ctx, 0)[i]; // TODO: check if position 0 is the right
+        cur_p->data[i].logit = llama_get_logits_ith(ctx, 0)[i]; // For a single-token batch, logits are always at index 0.
     }
     cur_p->sorted = false;
     common_sampler_apply_chain(smpl, cur_p);
@@ -415,9 +419,11 @@ void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, b
     LOG_INF("[MTP-UPDATE|%s] Updating %d tokens...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", batch.n_tokens);
 
     llama_batch mtp_batch = batch;
-    mtp_batch.update_mtp_kv = true;
-    mtp_batch.use_mtp_head  = true;
-    mtp_batch.is_mtp_prompt_warmup = is_prompt_warmup;
+    if (is_prompt_warmup) {
+        mtp_batch.mtp_params.op_type = MTP_OP_WARMUP;
+    } else {
+        mtp_batch.mtp_params.op_type = MTP_OP_UPDATE_ACCEPTED;
+    }
 
     for (int i = 0; i < mtp_batch.n_tokens; ++i) {
         mtp_batch.logits[i] = false;

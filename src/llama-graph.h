@@ -417,8 +417,7 @@ struct llm_graph_params {
     const llama_adapter_loras    * loras;
     const llama_memory_context_i * mctx;
     const llama_cross            * cross;
-    bool update_mtp_kv;
-    bool use_mtp_head;
+    llama_mtp_params             mtp_params;
 
     uint32_t n_outputs;
 
@@ -467,8 +466,7 @@ struct llm_graph_params {
             cvec      == other.cvec  &&
             loras     == other.loras &&
             cross     == other.cross &&
-            update_mtp_kv == other.update_mtp_kv &&
-            use_mtp_head  == other.use_mtp_head  &&
+            mtp_params.op_type == other.mtp_params.op_type &&
             n_outputs == other.n_outputs;
     }
 };

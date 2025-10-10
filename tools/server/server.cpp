@@ -3514,16 +3514,15 @@ struct server_context {
                 continue; // continue loop of n_batch
             }
 
-            bool needs_mtp_warmup = false;
-            if (slot_batched && slot_batched->has_mtp) {
-                if (slot_batched->state == SLOT_STATE_PROCESSING_PROMPT || slot_batched->state == SLOT_STATE_DONE_PROMPT) {
-                    needs_mtp_warmup = true;
-                }
-            }
-            
-            if (needs_mtp_warmup) {
+            if (slot_batched && slot_batched->has_mtp &&
+                (slot_batched->state == SLOT_STATE_PROCESSING_PROMPT || slot_batched->state == SLOT_STATE_DONE_PROMPT)) {
+
+                // Prepare the context to reuse the exact sinfo layout (including multiple u-batches)
+                // from the main model's prompt processing pass. This ensures the MTP layer's
+                // KV cache is perfectly aligned.
                 if (llama_mtp_prepare_sinfo_for_warmup(ctx)) {
                     mtp_update_kv_cache(ctx, batch_view, true);
+                    // Clean up the forced state to not affect subsequent decodes.
                     llama_mtp_cancel_sinfo_update(ctx);
                 } else {
                     LOG_ERR("%s: Failed to prepare the MTP symphony for warmup.", __func__);

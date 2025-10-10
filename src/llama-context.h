@@ -111,9 +111,7 @@ struct llama_context {
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
                        ggml_status & ret,
-                const bool do_mtp_kv_update,
-                const bool use_mtp_head,
-                bool is_mtp_prompt_warmup);
+                const llama_mtp_params & mtp_params);
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
@@ -229,8 +227,7 @@ private:
                       const llama_ubatch & ubatch,
             const llama_memory_context_i * mctx,
                           llm_graph_type   gtype,
-                           bool update_mtp_kv,
-                           bool use_mtp_head) const;
+                           const llama_mtp_params & mtp_params) const;
 
     llm_graph_cb graph_get_cb(ggml_backend_sched * sched_override = nullptr) const;
 

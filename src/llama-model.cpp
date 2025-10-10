@@ -13788,24 +13788,24 @@ struct llm_build_glm4 : public llm_graph_context {
 
 struct llm_build_glm4_moe : public llm_graph_context {
     llm_build_glm4_moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
-        LLAMA_LOG_WARN(
-            "[GRAPH_BUILD] Building graph. Path: %s, MTP_Update: %s, UBatch_Tokens: %d, First_Pos: %d\n",
-            params.use_mtp_head ? "MTP" : "MAIN",
-            params.update_mtp_kv ? "true" : "false",
-            n_tokens,
-            n_tokens > 0 ? ubatch.pos[0] : -1
-        );
+        // LLAMA_LOG_WARN(
+        //     "[GRAPH_BUILD] Building graph. Path: %s, MTP_Update: %s, UBatch_Tokens: %d, First_Pos: %d\n",
+        //     params.use_mtp_head ? "MTP" : "MAIN",
+        //     params.update_mtp_kv ? "true" : "false",
+        //     n_tokens,
+        //     n_tokens > 0 ? ubatch.pos[0] : -1
+        // );
         const int64_t n_embd_head = hparams.n_embd_head_v;
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
 
         ggml_tensor * cur;
 
-        LLAMA_LOG_WARN(
-            "[DEBUG-GRAPH-STATE] Building graph. MTP Head=%s, MTP KV Update=%s, n_tokens=%d\n",
-            params.use_mtp_head ? "true" : "false",
-            params.update_mtp_kv ? "true" : "false",
-            n_tokens
-        );
+        // LLAMA_LOG_WARN(
+        //     "[DEBUG-GRAPH-STATE] Building graph. MTP Head=%s, MTP KV Update=%s, n_tokens=%d\n",
+        //     params.use_mtp_head ? "true" : "false",
+        //     params.update_mtp_kv ? "true" : "false",
+        //     n_tokens
+        // );
         // for (int i = 0; i < n_tokens; ++i) {
         //     LLAMA_LOG_WARN("  - ubatch token[%d]: ID=%d, Pos=%d\n", i, ubatch.token[i], ubatch.pos[i]);
         // }
@@ -13817,10 +13817,10 @@ struct llm_build_glm4_moe : public llm_graph_context {
             );
         }
 
-        if (params.use_mtp_head) {
+        if (params.mtp_params.op_type != MTP_OP_NONE) {
             ggml_tensor* hidden_states_from_main_model;
 
-            if (params.update_mtp_kv) {
+            if (params.mtp_params.op_type == MTP_OP_WARMUP || params.mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
                 hidden_states_from_main_model = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, hparams.n_embd, n_tokens);
                 ggml_set_name(hidden_states_from_main_model, "result_embd_pooled");
                 ggml_set_input(hidden_states_from_main_model);
@@ -18349,7 +18349,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     
     std::unique_ptr<llm_graph_context> llm;
 
-    const bool build_mtp = params.update_mtp_kv;
+    const bool build_mtp = params.mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED;
 
     switch (arch) {
         case LLM_ARCH_LLAMA:
@@ -18708,16 +18708,16 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             GGML_ABORT("fatal error");
     }
 
-    if (!params.use_mtp_head) {
+    if (params.mtp_params.op_type == MTP_OP_NONE) {
         // add on pooling layer
         llm->build_pooling(cls, cls_b, cls_out, cls_out_b);
     }
     const int64_t t_end_us = ggml_time_us();
-    LLAMA_LOG_INFO(
-        "[PERF] Graph build time: %.2f ms (MTP path: %s)\n",
-        (t_end_us - t_start_us) / 1000.0,
-        params.use_mtp_head ? "yes" : "no"
-    );
+    // LLAMA_LOG_INFO(
+    //     "[PERF] Graph build time: %.2f ms (MTP path: %s)\n",
+    //     (t_end_us - t_start_us) / 1000.0,
+    //     params.use_mtp_head ? "yes" : "no"
+    // );
     return llm->res->get_gf();
 }
 

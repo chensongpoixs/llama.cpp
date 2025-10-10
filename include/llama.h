@@ -221,6 +221,17 @@ extern "C" {
     //               - if not:        only the last token is output
     //            )
     //
+    typedef enum {
+        MTP_OP_NONE,
+        MTP_OP_WARMUP,
+        MTP_OP_UPDATE_ACCEPTED,
+        MTP_OP_DRAFT_GEN,
+    } llama_mtp_op_type;
+
+    typedef struct llama_mtp_params {
+        llama_mtp_op_type op_type;
+    } llama_mtp_params;
+
     typedef struct llama_batch {
         int32_t n_tokens;
 
@@ -230,9 +241,7 @@ extern "C" {
         int32_t      *  n_seq_id;
         llama_seq_id ** seq_id;
         int8_t       *  logits;   // TODO: rename this to "output"
-        bool            update_mtp_kv; 
-        bool            use_mtp_head;
-        bool            is_mtp_prompt_warmup;
+        llama_mtp_params mtp_params;
     } llama_batch;
 
     enum llama_model_kv_override_type {
