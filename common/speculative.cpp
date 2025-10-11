@@ -380,11 +380,6 @@ llama_token mtp_speculative_gen_draft(
 
     mtp_batch.mtp_params.op_type = MTP_OP_DRAFT_GEN;
 
-    // LOG_INF("[DEBUG-DRAFT-CALL] Calling llama_decode for draft. update_mtp_kv=%s, use_mtp_head=%s\n",
-    //     mtp_batch.update_mtp_kv ? "true" : "false",
-    //     mtp_batch.use_mtp_head ? "true" : "false"
-    // );
-
     // Perform the MTP draft generation decode. This writes the MTP layer's
     // KV state for the draft token into the cache.
     llama_decode(ctx, mtp_batch);
@@ -416,7 +411,7 @@ void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, b
         return;
     }
 
-    LOG_INF("[MTP-UPDATE|%s] Updating %d tokens...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", batch.n_tokens);
+    LOG_DBG("[MTP-UPDATE|%s] Updating %d tokens...\n", is_prompt_warmup ? "PROMPT_WARMUP" : "GEN_ACCEPTED", batch.n_tokens);
 
     llama_batch mtp_batch = batch;
     if (is_prompt_warmup) {
@@ -426,7 +421,7 @@ void mtp_update_kv_cache(struct llama_context * ctx, const llama_batch& batch, b
     }
 
     for (int i = 0; i < mtp_batch.n_tokens; ++i) {
-        mtp_batch.logits[i] = false;
+        mtp_batch.logits[i] = true;
     }
     llama_decode(ctx, mtp_batch);
 }
@@ -447,7 +442,7 @@ void mtp_accept_tokens(
 
     llama_batch accepted_batch = llama_batch_init(ids.size(), 0, 1);
     for (size_t i = 0; i < ids.size(); ++i) {
-        common_batch_add(accepted_batch, ids[i], n_past_base + i, { seq_id }, false);
+        common_batch_add(accepted_batch, ids[i], n_past_base + i, { seq_id }, true);
     }
 
     mtp_update_kv_cache(ctx, accepted_batch, false);
@@ -455,16 +450,4 @@ void mtp_accept_tokens(
     llama_mtp_cancel_sinfo_update(ctx);
 
     llama_batch_free(accepted_batch);
-}
-
-// Debug function - It will be removed later
-double calculate_vector_sum_double(const float* vec, size_t size) {
-    if (!vec) {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (size_t i = 0; i < size; ++i) {
-        sum += vec[i];
-    }
-    return sum;
 }

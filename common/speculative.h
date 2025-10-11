@@ -57,5 +57,3 @@ void mtp_accept_tokens(
     int32_t n_past_base,
     llama_seq_id seq_id
 );
-
-double calculate_vector_sum_double(const float* vec, size_t size);

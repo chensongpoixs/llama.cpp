@@ -1738,7 +1738,7 @@ struct server_queue {
 
         while (true) {
             QUE_DBG("%s", "processing new tasks\n");
-            const int64_t t_turn_start_us = ggml_time_us();
+
             while (true) {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
                 if (!running) {
@@ -1761,11 +1761,7 @@ struct server_queue {
             QUE_DBG("%s", "update slots\n");
 
             callback_update_slots();
-            const int64_t t_turn_end_us = ggml_time_us();
-            SRV_DBG(
-                "[PERF] Server turn time: %.2f ms\n",
-                (t_turn_end_us - t_turn_start_us) / 1000.0
-            );
+
             QUE_DBG("%s", "waiting for new tasks\n");
             {
                 std::unique_lock<std::mutex> lock(mutex_tasks);
@@ -3471,7 +3467,6 @@ struct server_context {
                 batch.seq_id   + i,
                 batch.logits   + i,
             };
-            LOG_INF("\n[DEBUG-CHUNK] Processing main model chunk. Batch size: %d\n", n_tokens);
 
             const int ret = llama_decode(ctx, batch_view);
 
@@ -3569,10 +3564,8 @@ struct server_context {
                 }
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
                 slot.last_tok_idx = tok_idx;
-                //SRV_INF("main loop sampled token: '%s'\n", common_token_to_piece(ctx, id, true).c_str());
 
                 slot.i_batch = -1;
-                SLT_INF(slot, "[SAMPLER-ACCEPT] Accepting token ID %d at index %zu\n", id, i);
                 common_sampler_accept(slot.smpl, id, true);
 
                 slot.n_decoded += 1;
@@ -3644,7 +3637,6 @@ struct server_context {
 
                 llama_tokens draft;
                 if (slot.has_mtp) {
-                    SLT_INF(slot, "[POS-SYNC] Before draft gen. n_past = %d\n", slot.n_past);
                     llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
                     draft.reserve(1);
                     draft.push_back(draft_id);
@@ -3680,25 +3672,13 @@ struct server_context {
                 }
 
                 SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
-                SLT_INF(slot, "[POS-SYNC] Before validation decode. n_past = %d, spec_batch_size = %d\n", slot.n_past, slot.batch_spec.n_tokens);
                 llama_decode(ctx, slot.batch_spec);
-
-                const size_t n_embd = llama_n_embd(llama_get_model(ctx));
-                const size_t golden_buffer_size_in_floats = slot.batch_spec.n_tokens * n_embd;
-                const float* golden_embd_ptr = llama_get_embeddings(ctx);
-                double golden_checksum = calculate_vector_sum_double(golden_embd_ptr, golden_buffer_size_in_floats);
-                SLT_INF(slot, "[VERIFY] Golden checksum after validation: %e (size: %zu tokens)\n", golden_checksum, slot.batch_spec.n_tokens);
 
                 // the accepted tokens from the speculation
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
-                SLT_INF(slot, "[POS-SYNC] Tokens accepted: %zu\n", ids.size());
                 
                 if (slot.has_mtp) {
                     llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
-
-                    const float* embd_after_draft_ptr = llama_get_embeddings(ctx);
-                    double checksum_after_draft = calculate_vector_sum_double(embd_after_draft_ptr, golden_buffer_size_in_floats);
-                    SLT_INF(slot, "[VERIFY] Checksum after draft gen (should be unchanged): %e\n", checksum_after_draft);
 
                     if (!ids.empty()) {
                         llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
@@ -3707,14 +3687,9 @@ struct server_context {
                     }
 
                     mtp_accept_tokens(ctx, ids, slot.n_past, slot.id);
-
-                    const float* embd_after_update_ptr = llama_get_embeddings(ctx);
-                    double checksum_after_update = calculate_vector_sum_double(embd_after_update_ptr, golden_buffer_size_in_floats);
-                    SLT_INF(slot, "[VERIFY] Checksum after MTP update (should be unchanged): %e\n", checksum_after_update);
                 }
 
                 slot.n_past    += ids.size();
-                SLT_INF(slot, "[POS-SYNC] After n_past update. New n_past = %d\n", slot.n_past);
                 slot.n_decoded += ids.size();
 
                 // update how many tokens out of those tested were accepted

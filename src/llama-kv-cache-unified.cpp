@@ -766,7 +766,6 @@ bool llama_kv_cache_unified::update(llama_context * lctx, bool do_shift, const d
 }
 
 llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_ubatch & ubatch, bool cont) const {
-    LLAMA_LOG_WARN("%s: Entering find_slot for ubatch of %d tokens.\n", __func__, ubatch.n_tokens);
     if (debug > 0) {
         const auto & cells = v_cells[seq_to_stream[1]];
 
@@ -972,9 +971,6 @@ llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_
                 }
             }
         }
-        LLAMA_LOG_WARN("%s: find_slot SUCCEEDED for ubatch of %d tokens. Idxs:%s\n", __func__, ubatch.n_tokens, idxs_str.c_str());
-    } else {
-        LLAMA_LOG_ERROR("%s: find_slot FAILED to allocate cells for ubatch of %d tokens.\n", __func__, ubatch.n_tokens);
     }
 
     return res;

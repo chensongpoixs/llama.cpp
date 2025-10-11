@@ -809,15 +809,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
-    const int64_t t_exec_start_us = ggml_time_us();
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
-    const int64_t t_exec_end_us = ggml_time_us();
-    // LLAMA_LOG_INFO(
-    //     "[PERF] Graph compute time: %.2f ms (ubatch_size: %u, MTP path: %s)\n",
-    //     (t_exec_end_us - t_exec_start_us) / 1000.0,
-    //     ubatch.n_tokens,
-    //     do_mtp_kv_update ? "yes" : "no"
-    // );
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -827,9 +819,6 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     ret = GGML_STATUS_SUCCESS;
     if (mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
         ggml_tensor * sum_tensor = ggml_get_tensor(res->get_ctx(), "mtp_input_sum");
-        if (sum_tensor) {
-            LLAMA_LOG_WARN("[DEBUG-SUM] MTP input sum node successfully created.\n");
-        }
     }
     return res;
 }
@@ -1123,20 +1112,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
     
     do {
         const auto & ubatch = mctx->get_ubatch();
-        if (ubatch.n_tokens > 0) {
-            std::string pos_str;
-            for (uint32_t i = 0; i < std::min((uint32_t)5, ubatch.n_tokens); ++i) {
-                pos_str += std::to_string(ubatch.pos[i]) + " ";
-            }
-            // LLAMA_LOG_WARN(
-            //     "[DEBUG-POS] ubatch_size=%u, update_mtp_kv=%s, use_mtp_head=%s. Positions: %s...\n",
-            //     ubatch.n_tokens,
-            //     batch_inp.update_mtp_kv ? "true" : "false",
-            //     batch_inp.use_mtp_head ? "true" : "false",
-            //     pos_str.c_str()
-            // );
-        }
-
         // count the outputs in this ubatch
         {
             int32_t n_outputs_new = 0;
@@ -1281,8 +1256,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
                             GGML_ABORT("unknown pooling type");
                         }
                 }
-            } else {
-                LLAMA_LOG_WARN("[DEBUG-EMBD-COPY] Skipping embedding buffer copy for MTP operation (use_mtp_head=true).\n");
             }
         }
 
@@ -1346,13 +1319,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // Reset state for the next token before backend sync, to allow the CPU activities in the reset to
         // overlap with device computation.
         ggml_backend_sched_reset(sched.get());
-    }
-
-    if (batch_inp.mtp_params.op_type == MTP_OP_NONE) {
-        synchronize(); 
-        const size_t n_embd = this->model.hparams.n_embd;
-        double full_buffer_sum = calculate_vector_sum(this->embd, n_outputs_all * n_embd);
-        LLAMA_LOG_WARN("[INTEGRITY-CHECK|A] After main decode. ubatch_size=%d. Checksum: %e\n", n_outputs_all, full_buffer_sum);
     }
     return 0;
 }
@@ -3124,7 +3090,7 @@ std::unique_ptr<llama_memory_context_i> llama_context::initialize_decode_context
     if (cparams.warmup) {
         mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
     } else if (kvd->forced_sinfos && !kvd->forced_sinfos->empty()) {
-        LLAMA_LOG_WARN("[DEBUG-CACHE-REUSE] Forcing sinfos, bypassing find_slot.\n");
+        LLAMA_LOG_DEBUG("%s: Forcing sinfos, bypassing find_slot.\n", __func__);
         mctx = static_cast<llama_kv_cache_unified *>(memory.get())->init_batch_with_sinfos(
             *balloc, cparams.n_ubatch, *kvd->forced_sinfos, true
         );
@@ -3160,18 +3126,12 @@ bool llama_context::prepare_mtp_graph_inputs(
     }
 
     if (source_hidden_state != nullptr && hidden_states_input != nullptr) {
-        const size_t n_embd = this->model.hparams.n_embd;
-        const size_t n_tokens_for_sum = (mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED && ubatch.n_tokens > 2) ? ubatch.n_tokens : 1;
-        double input_sum = calculate_vector_sum(source_hidden_state, n_tokens_for_sum * n_embd);
-        
         const char * op_type;
         if (mtp_params.op_type == MTP_OP_WARMUP || mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
             op_type = "MTP_UPDATE";
         } else { // MTP_OP_DRAFT_GEN
             op_type = "DRAFT_GEN";
         }
-
-        LLAMA_LOG_WARN("[MTP-INPUT-CHECK] Operation: %s | Input Checksum: %e\n", op_type, input_sum);
 
         ggml_backend_tensor_set(hidden_states_input, source_hidden_state, 0, ggml_nbytes(hidden_states_input));
     } else {
