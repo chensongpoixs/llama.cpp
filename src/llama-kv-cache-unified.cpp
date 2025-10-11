@@ -977,6 +977,10 @@ llama_kv_cache_unified::slot_info llama_kv_cache_unified::find_slot(const llama_
 }
 
 void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch, bool is_inplace_update) {
+    // For "in-place" updates (MTP warmup/accept), we only update the tensor data.
+    // The cell metadata (logical position, sequence ID) has already been set
+    // by the main model's pass. We must skip all metadata modifications
+    // to prevent `pos_set` from asserting on an already-set cell.
     if (!is_inplace_update) {
         // keep track of the max sequence position that we would overwrite with this ubatch
         // for non-SWA cache, this would be always empty
@@ -995,17 +999,12 @@ void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_u
 
                 const auto idx = sinfo.idxs[s][ii];
 
-                if (!is_inplace_update) {
-                    if (!cells.is_empty(idx)) {
-                        assert(cells.seq_count(idx) == 1);
-
-                        const llama_seq_id seq_id = cells.seq_get(idx);
-                        const llama_pos    pos    = cells.pos_get(idx);
-
-                        seq_pos_max_rm[seq_id] = std::max(seq_pos_max_rm[seq_id], pos);
-
-                        cells.rm(idx);
-                    }
+                if (!cells.is_empty(idx)) {
+                    assert(cells.seq_count(idx) == 1);
+                    const llama_seq_id seq_id = cells.seq_get(idx);
+                    const llama_pos    pos    = cells.pos_get(idx);
+                    seq_pos_max_rm[seq_id] = std::max(seq_pos_max_rm[seq_id], pos);
+                    cells.rm(idx);
                 }
 
                 cells.pos_set(idx, ubatch.pos[i]);
@@ -1029,19 +1028,17 @@ void llama_kv_cache_unified::apply_ubatch(const slot_info & sinfo, const llama_u
             auto & cells = v_cells[seq_to_stream[s]];
 
             if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
-                LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
-                        __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
 
                 seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
             }
         }
+    }
 
-        // move the head at the end of the slot
-        for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
-            auto & head = v_heads[sinfo.strm[s]];
+    // move the head at the end of the slot
+    for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
+        auto & head = v_heads[sinfo.strm[s]];
 
-            head = sinfo.idxs[s].back() + 1;
-        }
+        head = sinfo.idxs[s].back() + 1;
     }
 }
 

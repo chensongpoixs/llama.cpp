@@ -30,6 +30,10 @@ struct llama_context {
 
     ~llama_context();
     
+    // The llama_context manages significant resources (GPU memory, file handles, PImpl data)
+    // and is fundamentally a non-copyable, non-movable object. Deleting these special
+    // member functions enforces this rule and is also technically required to allow the
+    // PImpl pattern (via unique_ptr or void*) with an incomplete type in the header.
     llama_context(const llama_context &) = delete;
     llama_context & operator=(const llama_context &) = delete;
     llama_context(llama_context &&) = delete;

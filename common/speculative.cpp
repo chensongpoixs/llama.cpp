@@ -436,10 +436,13 @@ void mtp_accept_tokens(
         return;
     }
 
+    // Prepare a resized copy of the validation sinfo to match the number of accepted tokens.
+    //    This sets up the context for a "forced sinfo" decode.
     if (!llama_mtp_prepare_sinfo_for_update(ctx, ids.size())) {
         return;
     }
 
+    // Build a new batch containing only the accepted tokens.
     llama_batch accepted_batch = llama_batch_init(ids.size(), 0, 1);
     for (size_t i = 0; i < ids.size(); ++i) {
         common_batch_add(accepted_batch, ids[i], n_past_base + i, { seq_id }, true);
@@ -447,6 +450,7 @@ void mtp_accept_tokens(
 
     mtp_update_kv_cache(ctx, accepted_batch, false);
 
+    // Clean up the forced state to not affect subsequent, normal decode calls.
     llama_mtp_cancel_sinfo_update(ctx);
 
     llama_batch_free(accepted_batch);
