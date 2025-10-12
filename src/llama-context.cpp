@@ -13,7 +13,6 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <numeric>
 
 //
 // llama_context
@@ -738,17 +737,6 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
-static double calculate_vector_sum(const float* vec, size_t size) {
-    if (!vec) {
-        return 0.0;
-    }
-    double sum = 0.0;
-    for (size_t i = 0; i < size; ++i) {
-        sum += vec[i];
-    }
-    return sum;
-}
-
 llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret,
                                                 const llama_mtp_params & mtp_params) {
     if (mctx && !mctx->apply()) {
@@ -995,10 +983,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
     auto * kvd = static_cast<llama_context_kv_cache_data *>(kv_cache_data);
-    // LLAMA_LOG_WARN("[DEBUG-DECODE-ENTRY] Entering llama_decode. update_mtp_kv=%s, use_mtp_head=%s\n",
-    //     batch_inp.update_mtp_kv ? "true" : "false",
-    //     batch_inp.use_mtp_head ? "true" : "false"
-    // );
 
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
@@ -1074,10 +1058,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 }
             case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
                 {
-                    // if (use_last_main_model_sinfos) {
-                    //     LLAMA_LOG_ERROR("%s: Mismatch between ubatches and sinfos during reuse.\n", __func__);
-                    //     return -1;
-                    // }
+                    if (kvd->forced_sinfos) {
+                        LLAMA_LOG_ERROR("%s: Mismatch between ubatches and sinfos during reuse.\n", __func__);
+                        return -1;
+                    }
 
                     if (!did_optimize) {
                         did_optimize = true;
@@ -1106,9 +1090,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
     };
 
     int64_t n_outputs_prev = 0;
-    // const bool do_mtp_kv_update = batch_inp.update_mtp_kv;
-    // const bool use_mtp_head = batch_inp.use_mtp_head;
-    // const bool is_prompt_warmup = batch_inp.is_mtp_prompt_warmup;
     
     do {
         const auto & ubatch = mctx->get_ubatch();
@@ -1127,14 +1108,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
         }
-        // if (do_mtp_kv_update) {
-        //     LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] MTP KV Update ubatch: n_tokens=%d\n", ubatch.n_tokens);
-        //     std::string positions_str;
-        //     for (int i = 0; i < std::min((uint32_t)5, ubatch.n_tokens); ++i) {
-        //         positions_str += std::to_string(ubatch.pos[i]) + " ";
-        //     }
-        //     LLAMA_LOG_WARN("[DEBUG-MTP-UPDATE] Positions: %s...\n", positions_str.c_str());
-        // }
         ggml_status status;
         const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, batch_inp.mtp_params);
         if (!res) {
@@ -1194,14 +1167,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
             }
         }
-
-        // if (use_mtp_head) {
-        //     if (t_embd != nullptr) {
-        //         LLAMA_LOG_ERROR("[MTP-GRAPH-BUG] The MTP graph returned an embedding tensor when it shouldn't have! This will cause corruption.\n");
-        //     } else {
-        //         LLAMA_LOG_WARN("[MTP-GRAPH-OK] The MTP graph correctly did not return an embedding tensor.\n");
-        //     }
-        // }
 
         // extract embeddings
         if (t_embd && n_outputs > 0) {

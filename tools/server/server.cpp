@@ -3520,7 +3520,7 @@ struct server_context {
                     // Clean up the forced state to not affect subsequent decodes.
                     llama_mtp_cancel_sinfo_update(ctx);
                 } else {
-                    LOG_ERR("%s: Failed to prepare the MTP symphony for warmup.", __func__);
+                    LOG_ERR("%s: Failed to prepare the MTP for warmup.", __func__);
                 }
             }
 

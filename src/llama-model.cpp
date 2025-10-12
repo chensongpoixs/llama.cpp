@@ -13829,11 +13829,6 @@ struct llm_build_glm4_moe : public llm_graph_context {
             // Final layer tensors are loaded but not processed in forward pass
             const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
             for (int il = 0; il < n_transformer_layers; ++il) {
-                // if (params.use_mtp_head) {
-                //     LLAMA_LOG_ERROR("[DEBUG-KV-ERROR] MTP path is running the main layer %d!\n", il);
-                // } else {
-                //     LLAMA_LOG_WARN("[DEBUG-KV] Main Head Path: Accessing layer %d\n", il);
-                // }
                 ggml_tensor * inpSA = inpL;
 
                 // Pre-attention norm
@@ -13976,7 +13971,6 @@ private:
         ggml_tensor * embd_copy = ggml_dup(ctx0, prev_embeddings);
 
         const int il = hparams.n_layer - 1;
-        // LLAMA_LOG_WARN("[DEBUG-KV] MTP Head Path: Accessing layer %d\n", il);
         ggml_tensor * sum_node = ggml_sum(ctx0, embd_copy);
 
         ggml_set_name(sum_node, "mtp_input_sum");
@@ -18311,12 +18305,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 }
 
 ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
-    const int64_t t_start_us = ggml_time_us();
     
     std::unique_ptr<llm_graph_context> llm;
-
-    const bool build_mtp = params.mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED;
-
     switch (arch) {
         case LLM_ARCH_LLAMA:
             {
@@ -18678,12 +18668,6 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
         // add on pooling layer
         llm->build_pooling(cls, cls_b, cls_out, cls_out_b);
     }
-    const int64_t t_end_us = ggml_time_us();
-    // LLAMA_LOG_INFO(
-    //     "[PERF] Graph build time: %.2f ms (MTP path: %s)\n",
-    //     (t_end_us - t_start_us) / 1000.0,
-    //     params.use_mtp_head ? "yes" : "no"
-    // );
     return llm->res->get_gf();
 }
 
