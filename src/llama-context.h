@@ -20,6 +20,8 @@ class llama_io_write_i;
 struct llama_memory_i;
 struct llama_memory_context_i;
 
+struct llama_context_kv_cache_data;
+
 struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
     llama_context(
@@ -27,6 +29,15 @@ struct llama_context {
                   llama_context_params params);
 
     ~llama_context();
+    
+    // The llama_context manages significant resources (GPU memory, file handles, PImpl data)
+    // and is fundamentally a non-copyable, non-movable object. Deleting these special
+    // member functions enforces this rule and is also technically required to allow the
+    // PImpl pattern (via unique_ptr or void*) with an incomplete type in the header.
+    llama_context(const llama_context &) = delete;
+    llama_context & operator=(const llama_context &) = delete;
+    llama_context(llama_context &&) = delete;
+    llama_context & operator=(llama_context &&) = delete;
 
     void synchronize();
 
@@ -61,6 +72,8 @@ struct llama_context {
     float * get_embeddings_seq(llama_seq_id seq_id);
     ggml_tensor * get_embeddings_tensor();
 
+    const float * draft_input_hidden_state = nullptr;
+
     void attach_threadpool(
             ggml_threadpool_t threadpool,
             ggml_threadpool_t threadpool_batch);
@@ -91,6 +104,8 @@ struct llama_context {
                 int32_t   il_start,
                 int32_t   il_end);
 
+    void kv_cache_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
+
     // process a single ubatch with a specific graph type
     // if memory_context is provided, it will be applied first to the context's memory
     // ret contains the status of the graph computation
@@ -99,7 +114,8 @@ struct llama_context {
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
-                       ggml_status & ret);
+                       ggml_status & ret,
+                const llama_mtp_params & mtp_params);
 
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
@@ -200,22 +216,32 @@ public:
     // reserve a graph with a dummy ubatch of the specified size
     ggml_cgraph * graph_reserve(uint32_t n_tokens, uint32_t n_seqs, uint32_t n_outputs, const llama_memory_context_i * mctx);
 
-    llm_graph_params mtp_graph_params(llm_graph_result * res, const llama_ubatch & ubatch, const llama_memory_context_i * mctx);
-
     void set_logits_ith(struct ggml_tensor * logit_override, ggml_backend_sched_t sched_override, int32_t i);
 
     ggml_backend_sched_t create_temp_scheduler(size_t n_nodes);
 
     std::unique_ptr<llama_memory_context_i> mtp_memory_batch(const llama_batch& batch_inp);
 
+    // For MTP KV cache cell reuse
+    void * kv_cache_data;
+
 private:
     llm_graph_params graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
             const llama_memory_context_i * mctx,
-                          llm_graph_type   gtype) const;
+                          llm_graph_type   gtype,
+                           const llama_mtp_params & mtp_params) const;
 
     llm_graph_cb graph_get_cb(ggml_backend_sched * sched_override = nullptr) const;
+
+    // Methods for MTP decode     
+    std::unique_ptr<llama_memory_context_i> initialize_decode_context(const llama_batch & batch_inp, const bool output_all);
+
+    bool prepare_mtp_graph_inputs(
+        llm_graph_result * res,
+        const llama_ubatch & ubatch,
+        const llama_mtp_params & mtp_params);
 
     // TODO: read/write lora adapters and cvec
     size_t state_write_data(llama_io_write_i & io);

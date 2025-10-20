@@ -1296,7 +1296,6 @@ struct server_slot {
 
     common_speculative * spec = nullptr;
     bool has_mtp = false;
-    std::vector<mtp_kv_update_data> mtp_kv_update_batch;
     int32_t last_tok_idx = -1;
 
     std::vector<common_adapter_lora_info> lora;
@@ -3394,9 +3393,6 @@ struct server_context {
                         // embedding requires all tokens in the batch to be output
                         const bool need_embd = server_task_type_need_embd(slot.task_type);
 
-                        if (slot.has_mtp) {
-                            slot.mtp_kv_update_batch.push_back({ cur_tok, slot.n_past, batch.n_tokens });
-                        }
                         common_batch_add(batch, cur_tok, slot.n_past, { slot.id }, need_embd);
 
                         slot.cache_tokens.push_back(cur_tok);
@@ -3513,11 +3509,19 @@ struct server_context {
                 continue; // continue loop of n_batch
             }
 
-            for (auto & slot : slots) {
-                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-                if (slot.has_mtp) {
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch, i, n_tokens);
-               }
+            if (slot_batched && slot_batched->has_mtp &&
+                (slot_batched->state == SLOT_STATE_PROCESSING_PROMPT || slot_batched->state == SLOT_STATE_DONE_PROMPT)) {
+
+                // Prepare the context to reuse the exact sinfo layout (including multiple u-batches)
+                // from the main model's prompt processing pass. This ensures the MTP layer's
+                // KV cache is perfectly aligned.
+                if (llama_mtp_prepare_sinfo_for_warmup(ctx)) {
+                    mtp_update_kv_cache(ctx, batch_view, true);
+                    // Clean up the forced state to not affect subsequent decodes.
+                    llama_mtp_cancel_sinfo_update(ctx);
+                } else {
+                    LOG_ERR("%s: Failed to prepare the MTP for warmup.", __func__);
+                }
             }
 
             // move the head of the batch forward with the number of tokens we just processed
@@ -3554,19 +3558,15 @@ struct server_context {
                 }
 
                 const int tok_idx = slot.i_batch - i;
-
+                // Sets the initial state for the first draft generation.
+                if (slot.has_mtp) {
+                    llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, -1));
+                }
                 llama_token id = common_sampler_sample(slot.smpl, ctx, tok_idx);
                 slot.last_tok_idx = tok_idx;
-                //SRV_INF("main loop sampled token: '%s'\n", common_token_to_piece(ctx, id, true).c_str());
 
                 slot.i_batch = -1;
-
                 common_sampler_accept(slot.smpl, id, true);
-
-                // This should only trigger on a non-empty update batch once, after prompt processing but not during token generation
-                //if (slot.has_mtp) {
-                //    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
-                //}
 
                 slot.n_decoded += 1;
 
@@ -3652,11 +3652,6 @@ struct server_context {
                     draft = common_speculative_gen_draft(slot.spec, params_spec, cached_text_tokens, id);
                 }
 
-                //llama_token draft_id = mtp_speculative_gen_draft(slot.smpl, ctx, id, slot.n_past, slot.last_tok_idx);
-                //llama_tokens draft;
-                //draft.reserve(1);
-                //draft.push_back(draft_id);
-
                 // ignore small drafts
                 if (slot.params.speculative.n_min > (int)draft.size()) {
                     SLT_DBG(slot, "ignoring small draft: %d < %d\n", (int)draft.size(), slot.params.speculative.n_min);
@@ -3677,17 +3672,21 @@ struct server_context {
                 }
 
                 SLT_DBG(slot, "decoding speculative batch, size = %d\n", slot.batch_spec.n_tokens);
-
                 llama_decode(ctx, slot.batch_spec);
 
                 // the accepted tokens from the speculation
                 const auto ids = common_sampler_sample_and_accept_n(slot.smpl, ctx, draft);
-
+                
                 if (slot.has_mtp) {
-                    for (int32_t i = 0; i < ids.size(); ++i) {
-                        slot.mtp_kv_update_batch.push_back({ ids[i], slot.n_past + 1 + i, i });
+                    llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
+
+                    if (!ids.empty()) {
+                        llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, ids.size() - 1));
+                    } else {
+                        llama_set_draft_input_hidden_state(ctx, llama_get_embeddings_ith(ctx, 0));
                     }
-                    mtp_update_kv_cache(ctx, slot.mtp_kv_update_batch);
+
+                    mtp_accept_tokens(ctx, ids, slot.n_past, slot.id);
                 }
 
                 slot.n_past    += ids.size();

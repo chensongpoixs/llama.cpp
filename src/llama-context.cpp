@@ -17,6 +17,11 @@
 //
 // llama_context
 //
+struct llama_context_kv_cache_data {
+    llama_kv_cache_unified::slot_info_vec_t last_main_model_sinfos;
+    llama_kv_cache_unified::slot_info_vec_t resized_sinfo_for_force;
+    const llama_kv_cache_unified::slot_info_vec_t * forced_sinfos = nullptr;
+};
 
 llama_context::llama_context(
         const llama_model & model,
@@ -104,6 +109,8 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+
+    kv_cache_data = new llama_context_kv_cache_data();
 
     {
         const char * LLAMA_SET_ROWS = getenv("LLAMA_SET_ROWS");
@@ -370,6 +377,7 @@ llama_context::llama_context(
 
 llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
+    delete static_cast<llama_context_kv_cache_data *>(kv_cache_data);
 }
 
 void llama_context::synchronize() {
@@ -729,7 +737,8 @@ bool llama_context::apply_adapter_cvec(
     return cvec.apply(model, data, len, n_embd, il_start, il_end);
 }
 
-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
+llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret,
+                                                const llama_mtp_params & mtp_params) {
     if (mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
@@ -741,7 +750,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     // the new graph parameters
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
-    const auto gparams = graph_params(res, ubatch, mctx, gtype);
+    const auto gparams = graph_params(res, ubatch, mctx, gtype, mtp_params);
 
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
@@ -772,6 +781,13 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         }
     }
 
+    if (mtp_params.op_type != MTP_OP_NONE) { // If it is any MTP operation
+        if (!prepare_mtp_graph_inputs(res, ubatch, mtp_params)) {
+            ret = GGML_STATUS_FAILED;
+            return nullptr;
+        }
+    }
+
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
@@ -789,7 +805,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     ret = GGML_STATUS_SUCCESS;
-
+    if (mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
+        ggml_tensor * sum_tensor = ggml_get_tensor(res->get_ctx(), "mtp_input_sum");
+    }
     return res;
 }
 
@@ -850,7 +868,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     cparams.causal_attn = false;
 
     ggml_status status;
-    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status);
+    const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_ENCODER, nullptr, status, { MTP_OP_NONE });
 
     cparams.causal_attn = causal_attn_org;
 
@@ -964,6 +982,8 @@ int llama_context::encode(const llama_batch & batch_inp) {
 int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
 
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(kv_cache_data);
+
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);
         return encode(batch_inp);
@@ -1018,10 +1038,11 @@ int llama_context::decode(const llama_batch & batch_inp) {
     // handle any pending defrags/shifts
     kv_self_update(false);
 
-    llama_memory_context_ptr mctx;
+    std::unique_ptr<llama_memory_context_i> mctx;
 
     while (true) {
-        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+        mctx = this->initialize_decode_context(batch_inp, output_all);
+
         if (!mctx) {
             return -2;
         }
@@ -1033,29 +1054,28 @@ int llama_context::decode(const llama_batch & batch_inp) {
             case LLAMA_MEMORY_STATUS_NO_UPDATE:
                 {
                     LLAMA_LOG_ERROR("%s: unexpected memory context status: %d\n", __func__, mctx->get_status());
-
                     return -2;
                 }
             case LLAMA_MEMORY_STATUS_FAILED_PREPARE:
                 {
+                    if (kvd->forced_sinfos) {
+                        LLAMA_LOG_ERROR("%s: Mismatch between ubatches and sinfos during reuse.\n", __func__);
+                        return -1;
+                    }
+
                     if (!did_optimize) {
                         did_optimize = true;
-
                         if (kv_self_update(true)) {
                             LLAMA_LOG_DEBUG("%s: retrying batch size %d after cache optimization\n", __func__, balloc->get_n_tokens());
-
                             continue;
                         }
                     }
-
                     LLAMA_LOG_WARN("%s: failed to find a memory slot for batch of size %d\n", __func__, balloc->get_n_tokens());
-
                     return 1;
                 }
             case LLAMA_MEMORY_STATUS_FAILED_COMPUTE:
                 {
                     LLAMA_LOG_ERROR("%s: compute failed while preparing batch of size %d\n", __func__, balloc->get_n_tokens());
-
                     return -2;
                 }
         }
@@ -1070,10 +1090,9 @@ int llama_context::decode(const llama_batch & batch_inp) {
     };
 
     int64_t n_outputs_prev = 0;
-
+    
     do {
         const auto & ubatch = mctx->get_ubatch();
-
         // count the outputs in this ubatch
         {
             int32_t n_outputs_new = 0;
@@ -1089,10 +1108,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
             // needs to happen before the graph is built
             n_outputs = n_outputs_new;
         }
-
         ggml_status status;
-        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status);
-
+        const auto * res = process_ubatch(ubatch, LLM_GRAPH_TYPE_DECODER, mctx.get(), status, batch_inp.mtp_params);
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the KV cache
             llama_pos pos_min[LLAMA_MAX_SEQ];
@@ -1131,7 +1148,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         auto * t_logits = res->get_logits();
         auto * t_embd   = cparams.embeddings ? res->get_embd() : nullptr;
-        embd_tensor = res->get_embd();
 
         if (t_embd && res->get_embd_pooled()) {
             t_embd = res->get_embd_pooled();
@@ -1139,71 +1155,81 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         // extract logits
         if (t_logits && n_outputs > 0) {
-            ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
-            GGML_ASSERT(backend_res != nullptr);
-            GGML_ASSERT(logits != nullptr);
+            // MTP operations that are purely for updating the KV cache
+            // (MTP_OP_WARMUP and MTP_OP_UPDATE_ACCEPTED) also produce a logit tensor
+            // as a side effect of running the graph. If these logits are copied
+            // back to the main context buffer, they will overwrite the valid logits
+            // produced by the main model's pass, leading to incorrect sampling.
+            // This condition explicitly prevents that copy for cache-only operations.
+            if (batch_inp.mtp_params.op_type != MTP_OP_WARMUP &&
+                batch_inp.mtp_params.op_type != MTP_OP_UPDATE_ACCEPTED) {
+                ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched.get(), t_logits);
+                GGML_ASSERT(backend_res != nullptr);
+                GGML_ASSERT(logits != nullptr);
 
-            float * logits_out = logits + n_outputs_prev*n_vocab;
+                float * logits_out = logits + n_outputs_prev*n_vocab;
 
-            if (n_outputs) {
-                GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
-                GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits_size);
-                ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                if (n_outputs) {
+                    GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
+                    GGML_ASSERT((n_outputs_prev + n_outputs)*n_vocab <= (int64_t) logits_size);
+                    ggml_backend_tensor_get_async(backend_res, t_logits, logits_out, 0, n_outputs*n_vocab*sizeof(float));
+                }
             }
         }
 
         // extract embeddings
         if (t_embd && n_outputs > 0) {
-            ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
-            GGML_ASSERT(backend_embd != nullptr);
+            if (batch_inp.mtp_params.op_type == MTP_OP_NONE) {
+                ggml_backend_t backend_embd = ggml_backend_sched_get_tensor_backend(sched.get(), t_embd);
+                GGML_ASSERT(backend_embd != nullptr);
 
-            switch (cparams.pooling_type) {
-                case LLAMA_POOLING_TYPE_NONE:
-                    {
-                        // extract token embeddings
-                        GGML_ASSERT(embd != nullptr);
-                        float * embd_out = embd + n_outputs_prev*n_embd;
+                switch (cparams.pooling_type) {
+                    case LLAMA_POOLING_TYPE_NONE:
+                        {
+                            // extract token embeddings
+                            GGML_ASSERT(embd != nullptr);
+                            float * embd_out = embd + n_outputs_prev*n_embd;
 
-                        if (n_outputs) {
-                            GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
-                            GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
+                            if (n_outputs) {
+                                GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
+                                GGML_ASSERT((n_outputs_prev + n_outputs)*n_embd <= (int64_t) embd_size);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_out, 0, n_outputs*n_embd*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_MEAN:
+                    case LLAMA_POOLING_TYPE_CLS:
+                    case LLAMA_POOLING_TYPE_LAST:
+                        {
+                            // extract sequence embeddings (cleared before processing each batch)
+                            auto & embd_seq_out = embd_seq;
+
+                            for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                                const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
+                                const int32_t      seq_idx = ubatch.seq_idx[seq_id];
+
+                                embd_seq_out[seq_id].resize(n_embd);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_RANK:
+                        {
+                            // extract the rerank score - n_cls_out floats per sequence
+                            auto & embd_seq_out = embd_seq;
+                            const uint32_t n_cls_out = hparams.n_cls_out;
+
+                            for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                                const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
+                                const int32_t      seq_idx = ubatch.seq_idx[seq_id];
+
+                                embd_seq_out[seq_id].resize(n_cls_out);
+                                ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
+                            }
+                        } break;
+                    case LLAMA_POOLING_TYPE_UNSPECIFIED:
+                        {
+                            GGML_ABORT("unknown pooling type");
                         }
-                    } break;
-                case LLAMA_POOLING_TYPE_MEAN:
-                case LLAMA_POOLING_TYPE_CLS:
-                case LLAMA_POOLING_TYPE_LAST:
-                    {
-                        // extract sequence embeddings (cleared before processing each batch)
-                        auto & embd_seq_out = embd_seq;
-
-                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
-                            const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
-                            const int32_t      seq_idx = ubatch.seq_idx[seq_id];
-
-                            embd_seq_out[seq_id].resize(n_embd);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_embd*seq_idx)*sizeof(float), n_embd*sizeof(float));
-                        }
-                    } break;
-                case LLAMA_POOLING_TYPE_RANK:
-                    {
-                        // extract the rerank score - n_cls_out floats per sequence
-                        auto & embd_seq_out = embd_seq;
-
-                        const uint32_t n_cls_out = hparams.n_cls_out;
-
-                        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
-                            const llama_seq_id seq_id  = ubatch.seq_id_unq[s];
-                            const int32_t      seq_idx = ubatch.seq_idx[seq_id];
-
-                            embd_seq_out[seq_id].resize(n_cls_out);
-                            ggml_backend_tensor_get_async(backend_embd, t_embd, embd_seq_out[seq_id].data(), (n_cls_out*seq_idx)*sizeof(float), n_cls_out*sizeof(float));
-                        }
-                    } break;
-                case LLAMA_POOLING_TYPE_UNSPECIFIED:
-                    {
-                        GGML_ABORT("unknown pooling type");
-                    }
+                }
             }
         }
 
@@ -1268,7 +1294,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
         // overlap with device computation.
         ggml_backend_sched_reset(sched.get());
     }
-
     return 0;
 }
 
@@ -1408,7 +1433,7 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 
     auto * res = gf_res_reserve.get();
 
-    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT);
+    const auto gparams = graph_params(res, ubatch, mctx, LLM_GRAPH_TYPE_DEFAULT, { MTP_OP_NONE });
 
     res->reset();
 
@@ -1428,8 +1453,9 @@ ggml_cgraph * llama_context::graph_reserve(uint32_t n_tokens, uint32_t n_seqs, u
 llm_graph_params llama_context::graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
-            const llama_memory_context_i * mctx,
-            llm_graph_type   gtype) const {
+                        const llama_memory_context_i * mctx,
+                        llm_graph_type   gtype,
+                        const llama_mtp_params & mtp_params) const {
     return {
         /*.arch        =*/ model.arch,
         /*.hparams     =*/ model.hparams,
@@ -1442,32 +1468,9 @@ llm_graph_params llama_context::graph_params(
         /*.loras       =*/ &loras,
         /*.mctx        =*/ mctx,
         /*.cross       =*/ &cross,
+        /*.mtp_params  =*/ mtp_params,
         /*.n_outputs   =*/ n_outputs,
         /*.cb          =*/ graph_get_cb(),
-        /*.res         =*/ res,
-    };
-}
-
-llm_graph_params llama_context::mtp_graph_params(
-    llm_graph_result * res,
-    const llama_ubatch& ubatch,
-    const llama_memory_context_i * mctx) {
-    size_t n_nodes = std::max<uint32_t>(1024u, 8u * 8u * (((model.hparams.nextn_predict_layers + 1) * model.n_tensors()) / model.hparams.n_layer));
-    ggml_backend_sched_t temp_sched = create_temp_scheduler(n_nodes);
-    return {
-        /*.arch        =*/ model.arch,
-        /*.hparams     =*/ model.hparams,
-        /*.cparams     =*/ cparams,
-        /*.ubatch      =*/ ubatch,
-        /*.gtype       =*/ LLM_GRAPH_TYPE_DECODER,
-        /*.sched       =*/ temp_sched,
-        /*.backend_cpu =*/ backend_cpu,
-        /*.cvec        =*/ &cvec,
-        /*.loras       =*/ &loras,
-        /*.mctx        =*/ mctx,
-        /*.cross       =*/ &cross,
-        /*.n_outputs   =*/ 1,
-        /*.cb          =*/ graph_get_cb(temp_sched),
         /*.res         =*/ res,
     };
 }
@@ -2206,7 +2209,7 @@ void llama_context::opt_epoch_iter(
 
             auto * res = gf_res_prev.get();
 
-            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT);
+            const auto gparams = graph_params(res, ubatch, mctx.get(), LLM_GRAPH_TYPE_DEFAULT, { MTP_OP_NONE });
 
             res->reset();
 
@@ -2995,79 +2998,121 @@ void llama_opt_epoch(
         callback_eval);
 }
 
-void llama_build_and_execute_mtp_graph(struct llama_context * ctx,
-    const llama_batch batch_inp, llama_token last_token_id, int32_t n_past, int32_t last_tok_idx) {
+void llama_set_draft_input_hidden_state(struct llama_context * ctx, const float * hidden_state) {
+    ctx->draft_input_hidden_state = hidden_state;
+}
 
-    const auto * model = llama_get_model(ctx);
+bool llama_mtp_prepare_sinfo_for_warmup(struct llama_context * ctx) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    const auto & last_sinfo = kvd->last_main_model_sinfos;
 
-    auto res_mtp = std::make_unique<llm_graph_result>(ctx->graph_max_nodes());
-    std::unique_ptr<llama_memory_context_i> mctx = ctx->mtp_memory_batch(batch_inp);
-
-    std::vector<uint32_t> idxs;
-    idxs.push_back(n_past);
-    llama_kv_cache_unified::slot_info sinfo = {
-        /*.s0   =*/ 0,
-        /*.s1   =*/ 0,
-        /*.strm =*/ { 0 },
-        /*.idxs =*/ { idxs },
-    };
-    llama_kv_cache_unified::slot_info_vec_t sinfos;
-    sinfos.push_back(sinfo);
-
-    static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_sinfos(sinfos);
-    const auto& ubatch_mtp = mctx->get_ubatch();
-
-    //llama_ubatch ubatch_mtp;
-    //ubatch_mtp.n_tokens = 1;
-    //ubatch_mtp.pos = &n_past;
-
-    auto params_mtp = std::make_unique<llm_graph_params>(ctx->mtp_graph_params(res_mtp.get(), ubatch_mtp, mctx.get()));
-    ggml_backend_sched_t sched = params_mtp->sched;
-
-    auto * last_embd = ctx->get_embeddings_ith(last_tok_idx);
-
-    //if (mctx && !mctx->set_n_kv()) {
-    //    LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
-    //}
-    static_cast<llama_kv_cache_unified_context*>(mctx.get())->set_n_kv();
-
-    auto * gf = model->build_mtp_graph(*params_mtp, last_token_id, n_past);
-
-    if (!gf) {
-        LLAMA_LOG_ERROR("%s: ERROR - The construction of the MTP graph failed (returned null).", __func__);
-        if (sched) ggml_backend_sched_free(sched);
-        return;
+    if (last_sinfo.empty()) {
+        LLAMA_LOG_ERROR("%s: The main call sinfo is not available for warmup.\n", __func__);
+        return false;
     }
 
-    ggml_backend_sched_reset(sched); // clear the allocation of the previous graph
-    ggml_backend_sched_alloc_graph(sched, gf); // explicitly allocate the new graph but do not execute it
+    kvd->forced_sinfos = &last_sinfo;
+    return true;
+}
 
-    ggml_tensor * mtp_token_id_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_token_id_input");
-    ggml_backend_tensor_set(mtp_token_id_input, &last_token_id, 0, sizeof(last_token_id)); // copy data to the newly allocated graph tensors
 
-    ggml_tensor * mtp_prev_embedding_input = ggml_get_tensor(res_mtp->get_ctx(), "mtp_prev_embedding_input");
-    ggml_backend_tensor_set(mtp_prev_embedding_input, last_embd, 0, ggml_nbytes(mtp_prev_embedding_input)); // copy data to the newly allocated graph tensors
+bool llama_mtp_prepare_sinfo_for_update(struct llama_context * ctx, size_t n_accepted) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    const auto & last_sinfo = kvd->last_main_model_sinfos;
 
-    ggml_backend_sched_graph_compute(sched, gf); // execute the graph
+    if (last_sinfo.empty() || last_sinfo[0].idxs.empty()) {
+        LLAMA_LOG_ERROR("%s: The sinfo for the last main call is not available.", __func__);
+        return false;
+    }
 
-    struct ggml_tensor * logits_mtp = res_mtp->get_logits();
+    kvd->resized_sinfo_for_force = last_sinfo;
+    
+    kvd->resized_sinfo_for_force[0].idxs[0].resize(n_accepted);
 
-    if (logits_mtp) {
-        float * logits_dest = ctx->get_logits_ith(last_tok_idx);
-        ggml_backend_t backend_res = ggml_backend_sched_get_tensor_backend(sched, logits_mtp);
-        if (backend_res) {
-            // ggml_backend_tensor_get is the function for GPU->CPU copies.
-            // We are copying a single 32-bit integer.
-            ggml_backend_tensor_get(logits_mtp, 
-                                    logits_dest, // Pointer to our C++ variable
-                                    0,          // Starting offset in bytes
-                                    ggml_nbytes(logits_mtp)); // Number of bytes to copy
-        } else {
-            LLAMA_LOG_ERROR("%s: ERROR - Could not obtain the backend for the logits tensor.", __func__);
-        }
+    kvd->forced_sinfos = &kvd->resized_sinfo_for_force;
+
+    return true;
+}
+
+void llama_mtp_cancel_sinfo_update(struct llama_context * ctx) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(ctx->kv_cache_data);
+    kvd->forced_sinfos = nullptr;
+}
+
+void llama_context::kv_cache_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    if (memory) {
+        static_cast<llama_kv_cache_unified *>(memory.get())->seq_rm(seq_id, p0, p1);
+    }
+}
+
+void llama_kv_cache_seq_rm(struct llama_context * ctx, llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    ctx->kv_cache_seq_rm(seq_id, p0, p1);
+}
+
+/*
+    Initializes the memory context for a decode operation.
+    The logic follows a specific priority:
+    1. Warmup: Always use a standard batch initialization.
+    2. Forced S-Info (MTP Updates): If a specific KV cache layout is forced, use it.
+    3. Default: Use a standard batch initialization, and if it's a main model pass,
+       save the resulting s-info for potential future reuse by MTP.
+*/
+std::unique_ptr<llama_memory_context_i> llama_context::initialize_decode_context(const llama_batch & batch_inp, const bool output_all) {
+    auto * kvd = static_cast<llama_context_kv_cache_data *>(kv_cache_data);
+    std::unique_ptr<llama_memory_context_i> mctx;
+
+    if (cparams.warmup) {
+        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+    } else if (kvd->forced_sinfos && !kvd->forced_sinfos->empty()) {
+        LLAMA_LOG_DEBUG("%s: Forcing sinfos, bypassing find_slot.\n", __func__);
+        mctx = static_cast<llama_kv_cache_unified *>(memory.get())->init_batch_with_sinfos(
+            *balloc, cparams.n_ubatch, *kvd->forced_sinfos, true
+        );
     } else {
-        LLAMA_LOG_WARN("%s: WARNING - The MTP graph did not produce a logit tensor.", __func__);
+        mctx = memory->init_batch(*balloc, cparams.n_ubatch, output_all);
+
+        if (batch_inp.mtp_params.op_type == MTP_OP_NONE) {
+            if (mctx && mctx->get_status() == LLAMA_MEMORY_STATUS_SUCCESS) {
+                kvd->last_main_model_sinfos = static_cast<llama_kv_cache_unified_context *>(mctx.get())->get_sinfos();
+            } else {
+                kvd->last_main_model_sinfos.clear();
+            }
+        }
+    }
+    
+    return mctx;
+}
+
+
+bool llama_context::prepare_mtp_graph_inputs(
+    llm_graph_result * res,
+    const llama_ubatch & ubatch,
+    const llama_mtp_params & mtp_params) {
+    
+    const char * target_tensor_name = "result_embd_pooled";
+    ggml_tensor* hidden_states_input = ggml_get_tensor(res->get_ctx(), target_tensor_name);
+
+    const float * source_hidden_state = nullptr;
+    if (mtp_params.op_type == MTP_OP_WARMUP || mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
+        source_hidden_state = this->embd;
+    } else { // MTP_OP_DRAFT_GEN
+        source_hidden_state = this->draft_input_hidden_state;
     }
 
-    ggml_backend_sched_free(sched);
+    if (source_hidden_state != nullptr && hidden_states_input != nullptr) {
+        const char * op_type;
+        if (mtp_params.op_type == MTP_OP_WARMUP || mtp_params.op_type == MTP_OP_UPDATE_ACCEPTED) {
+            op_type = "MTP_UPDATE";
+        } else { // MTP_OP_DRAFT_GEN
+            op_type = "DRAFT_GEN";
+        }
+
+        ggml_backend_tensor_set(hidden_states_input, source_hidden_state, 0, ggml_nbytes(hidden_states_input));
+    } else {
+        LLAMA_LOG_ERROR("%s: MTP hidden state input tensor ('%s') not found or main embd buffer is null\n",
+            __func__, target_tensor_name);
+        return false;
+    }
+
+    return true;
 }
