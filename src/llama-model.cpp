@@ -2303,8 +2303,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         throw std::runtime_error(format("%s: no CPU backend found", __func__));
     }
     const int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
-    const bool enable_gpu = !devices.empty() && split_sum > 0.0f;
-    const int act_gpu_layers = enable_gpu ? std::min(n_gpu_layers, (int)n_layer + 1) : 0;
+    const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, (int)n_layer + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < (int) hparams.n_layer && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
