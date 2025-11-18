@@ -1531,7 +1531,9 @@ class MmprojModel(ModelBase):
     preprocessor_config: dict[str, Any]
     global_config: dict[str, Any]
 
-    n_block_keys = ["n_layers", "num_hidden_layers", "n_layer", "num_layers", "depth"]
+    # Prefer explicit "layers"  (e.g. JinaCLIP),
+    # keep legacy keys for other models.
+    n_block_keys = ["layers", "n_layers", "num_hidden_layers", "n_layer", "num_layers", "depth"]
 
     has_vision_encoder: bool = True # by default
     has_audio_encoder: bool = False
@@ -6775,6 +6777,11 @@ class JinaCLIPVisionModel(MmprojModel):
         with open(config_path, encoding="utf-8") as f:
             self.vision_config = json.load(f)
 
+    def get_vision_config(self) -> dict[str, Any] | None:
+        # For JinaCLIPVisionModel, the top-level AutoConfig dict is already
+        # the vision-only configuration.
+        return self.global_config
+
     def set_vocab(self):
         # Vision encoder doesn't need vocabulary
         pass
@@ -6832,73 +6839,10 @@ class JinaCLIPVisionModel(MmprojModel):
     def _strip_vm_prefix(self, name: str) -> str:
         return name[len('vision_model.'):] if name.startswith('vision_model.') else name
 
-    def _map_block_tensor(self, layer: int, rest: str, data_torch: Tensor, name: str) -> list[tuple[str, Tensor]] | None:
-        parts = rest.split('.')
-        # layer norms
-        if rest.startswith('norm1.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ln1.{suffix}', data_torch)]
-        if rest.startswith('norm2.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ln2.{suffix}', data_torch)]
-        if rest.startswith('attn.inner_attn_ln.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.attn_ln.{suffix}', data_torch)]
-
-        if rest == 'attn.q_bias':
-            return [(f'v.blk.{layer}.attn_q.bias', data_torch)]
-        if rest == 'attn.v_bias':
-            return [(f'v.blk.{layer}.attn_v.bias', data_torch)]
-
-        if rest.startswith('attn.q_proj.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.attn_q.{suffix}', data_torch)]
-        if rest.startswith('attn.k_proj.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.attn_k.{suffix}', data_torch)]
-        if rest.startswith('attn.v_proj.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.attn_v.{suffix}', data_torch)]
-        if rest.startswith('attn.proj.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.attn_out.{suffix}', data_torch)]
-
-        # MLP
-        if rest.startswith('mlp.w1.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_gate.{suffix}', data_torch)]
-        if rest.startswith('mlp.w2.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_up.{suffix}', data_torch)]
-        if rest.startswith('mlp.w3.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_down.{suffix}', data_torch)]
-        if rest.startswith('mlp.ffn_ln.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_norm.{suffix}', data_torch)]
-        if rest.startswith('mlp.fc1.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_up.{suffix}', data_torch)]
-        if rest.startswith('mlp.fc2.'):
-            suffix = parts[-1]
-            return [(f'v.blk.{layer}.ffn_down.{suffix}', data_torch)]
-        return None
-
     def map_tensor_name(self, name: str, try_suffixes: Sequence[str] = (".weight", ".bias")) -> str:
-        """Prefer base table-driven mapping; keep Jina-specific targets if already mapped; fallback to legacy mapper."""
-        # Already a GGUF target name (e.g., "v.*" or "mm.*"): return as-is
         if name.startswith('v.') or name.startswith('mm.'):
             return name
-        # Try the base mapping first
-        try:
-            return super().map_tensor_name(name, try_suffixes=try_suffixes)
-        except Exception:
-            # Fallback to legacy Jina-specific mapper for any remaining edge keys
-            if hasattr(self, "_map_jinaclip_tensor_name"):
-                mapped = self._map_jinaclip_tensor_name(name)  # type: ignore[attr-defined]
-                if mapped:
-                    return mapped
-            return name
+        return super().map_tensor_name(name, try_suffixes=try_suffixes)
 
     def get_tensors(self) -> Iterator[tuple[str, Tensor]]:
         yielded_any = False
@@ -6937,39 +6881,10 @@ class JinaCLIPVisionModel(MmprojModel):
         return any(p in gguf_name for p in patterns)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        del bid  # unused
-
-        src = name
-        if src.startswith('v.') or src.startswith('mm.'):
-            return [(src, data_torch)]
-
-        # Drop 'vision_model.' prefix if present
-        src_no_vm = self._strip_vm_prefix(src)
-
-        # Top-level direct mappings — use gguf constants directly for canonical names
-        if src_no_vm == 'cls_token':
-            base = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_CLS]
-            return [(base, data_torch)]
-        if src_no_vm.startswith('patch_embed.proj.'):
-            suffix = src_no_vm.split('.')[-1]
-            base = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH]
-            return [(f'{base}.{suffix}', data_torch)]
-        if src_no_vm == 'pos_embed':
+        # keep only pos_embed special case (no .weight suffix); all other tensors use table-driven mapping
+        if name == 'pos_embed':
             pos_name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_POS] + '.weight'
             return [(pos_name, data_torch)]
-        if src_no_vm.startswith('norm.'):
-            suffix = src_no_vm.split('.')[-1]
-            base = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_POST_NORM]
-            return [(f'{base}.{suffix}', data_torch)]
-
-        if src_no_vm.startswith('blocks.'):
-            parts = src_no_vm.split('.')
-            if len(parts) >= 3 and parts[1].isdigit():
-                layer = int(parts[1])
-                rest = '.'.join(parts[2:])
-                mapped = self._map_block_tensor(layer, rest, data_torch, name)
-                if mapped is not None:
-                    return mapped
 
         try:
             return [(self.map_tensor_name(name), data_torch)]
