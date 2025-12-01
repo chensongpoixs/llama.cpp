@@ -694,6 +694,9 @@ class ModelBase:
         if "llm_config" in config:
             # rename for InternVL
             config["text_config"] = config["llm_config"]
+        if "lfm" in config:
+            # rename for LFM2-Audio
+            config["text_config"] = config["lfm"]
         if "thinker_config" in config:
             # rename for Qwen2.5-Omni
             config["text_config"] = config["thinker_config"]["text_config"]
@@ -9616,18 +9619,24 @@ class LFM2Model(TextModel):
         self._add_feed_forward_length()
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        is_vision_tensor = "vision_tower" in name or "multi_modal_projector" in name
-        if is_vision_tensor:
-            # skip vision tensors
+        if self._is_vision_tensor(name) or self._is_audio_tensor(name):
+            # skip multimodal tensors
             return []
 
-        name = name.replace("language_model.", "")
+        name = name.replace("language_model.", "") # vision
+        name = name.replace("lfm.", "model.")      # audio
 
         # conv op requires 2d tensor
         if 'conv.conv' in name:
             data_torch = data_torch.squeeze(1)
 
         return [(self.map_tensor_name(name), data_torch)]
+
+    def _is_vision_tensor(self, name: str) -> bool:
+        return "vision_tower" in name or "multi_modal_projector" in name
+
+    def _is_audio_tensor(self, name: str):
+        return any(p in name for p in ["audio", "codebook", "conformer", "depth_embedding", "depthformer", "depth_linear"])
 
 
 @ModelBase.register("Lfm2MoeForCausalLM")
