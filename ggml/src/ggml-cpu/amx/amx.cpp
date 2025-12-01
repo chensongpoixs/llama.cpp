@@ -110,6 +110,7 @@ static ggml_backend_buffer_i ggml_backend_amx_buffer_interface = {
     /* .init_tensor     = */ ggml_backend_amx_buffer_init_tensor,
     /* .memset_tensor   = */ ggml_backend_amx_buffer_memset_tensor,
     /* .set_tensor      = */ ggml_backend_amx_buffer_set_tensor,
+    /* .set_tensor_s_o  = */ nullptr,
     /* .get_tensor      = */ nullptr,
     /* .cpy_tensor      = */ nullptr,
     /* .clear           = */ ggml_backend_amx_buffer_clear,
