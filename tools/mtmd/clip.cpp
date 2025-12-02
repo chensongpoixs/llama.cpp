@@ -281,8 +281,9 @@ struct clip_layer {
     ggml_tensor * norm_conv_w   = nullptr;
     ggml_tensor * norm_conv_b   = nullptr;
     ggml_tensor * linear_pos_w  = nullptr;
-    ggml_tensor * conv_bn_w     = nullptr;
-    ggml_tensor * conv_bn_b     = nullptr;
+
+    ggml_tensor * conv_norm_w   = nullptr;
+    ggml_tensor * conv_norm_b   = nullptr;
     ggml_tensor * conv_dw_w     = nullptr;
     ggml_tensor * conv_dw_b     = nullptr;
     ggml_tensor * conv_pw1_w    = nullptr;
@@ -423,16 +424,8 @@ struct clip_model {
     ggml_tensor * mm_eoi = nullptr;
 
     // lfm2
-    ggml_tensor * pre_encode_conv_0_w  = nullptr;
-    ggml_tensor * pre_encode_conv_0_b  = nullptr;
-    ggml_tensor * pre_encode_conv_2_w  = nullptr;
-    ggml_tensor * pre_encode_conv_2_b  = nullptr;
-    ggml_tensor * pre_encode_conv_3_w  = nullptr;
-    ggml_tensor * pre_encode_conv_3_b  = nullptr;
-    ggml_tensor * pre_encode_conv_5_w  = nullptr;
-    ggml_tensor * pre_encode_conv_5_b  = nullptr;
-    ggml_tensor * pre_encode_conv_6_w  = nullptr;
-    ggml_tensor * pre_encode_conv_6_b  = nullptr;
+    std::array<ggml_tensor *, 7> pre_encode_conv_X_w;
+    std::array<ggml_tensor *, 7> pre_encode_conv_X_b;
     ggml_tensor * pre_encode_out_w     = nullptr;
     ggml_tensor * pre_encode_out_b     = nullptr;
 
@@ -2039,7 +2032,7 @@ struct clip_graph {
     ggml_cgraph * build_lfm2_audio() {
         const int n_frames = img.nx;
         const int n_pos    = n_frames / 2;
-        const int n_pos_embd = (((((n_frames + 1) / 2) + 1) / 2 + 1) / 2) * 2 - 1;
+        const int n_pos_embd = clip_n_output_tokens(ctx, &img) * 2 - 1;
         GGML_ASSERT(model.position_embeddings->ne[1] >= n_pos);
 
         ggml_tensor * pos_emb = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 512, n_pos_embd);
@@ -2055,34 +2048,34 @@ struct clip_graph {
         // pre encode, conv subsampling
         {
             // layer.0 - conv2d
-            cur = ggml_conv_2d(ctx0, model.pre_encode_conv_0_w, cur, 2, 2, 1, 1, 1, 1);
-            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_0_b, 1, 1, cur->ne[2], 1));
+            cur = ggml_conv_2d(ctx0, model.pre_encode_conv_X_w[0], cur, 2, 2, 1, 1, 1, 1);
+            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_X_b[0], 1, 1, cur->ne[2], 1));
             cb(cur, "conformer.pre_encode.conv.{}", 0);
 
             // layer.1 - relu
             cur = ggml_relu_inplace(ctx0, cur);
 
             // layer.2 conv2d dw
-            cur = ggml_conv_2d_dw_direct(ctx0, model.pre_encode_conv_2_w, cur, 2, 2, 1, 1, 1, 1);
-            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_2_b, 1, 1, cur->ne[2], 1));
+            cur = ggml_conv_2d_dw_direct(ctx0, model.pre_encode_conv_X_w[2], cur, 2, 2, 1, 1, 1, 1);
+            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_X_b[2], 1, 1, cur->ne[2], 1));
             cb(cur, "conformer.pre_encode.conv.{}", 2);
 
             // layer.3 conv2d
-            cur = ggml_conv_2d_direct(ctx0, model.pre_encode_conv_3_w, cur, 1, 1, 0, 0, 1, 1);
-            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_3_b, 1, 1, cur->ne[2], 1));
+            cur = ggml_conv_2d_direct(ctx0, model.pre_encode_conv_X_w[3], cur, 1, 1, 0, 0, 1, 1);
+            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_X_b[3], 1, 1, cur->ne[2], 1));
             cb(cur, "conformer.pre_encode.conv.{}", 3);
 
             // layer.4 - relu
             cur = ggml_relu_inplace(ctx0, cur);
 
             // layer.5 conv2d dw
-            cur = ggml_conv_2d_dw_direct(ctx0, model.pre_encode_conv_5_w, cur, 2, 2, 1, 1, 1, 1);
-            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_5_b, 1, 1, cur->ne[2], 1));
+            cur = ggml_conv_2d_dw_direct(ctx0, model.pre_encode_conv_X_w[5], cur, 2, 2, 1, 1, 1, 1);
+            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_X_b[5], 1, 1, cur->ne[2], 1));
             cb(cur, "conformer.pre_encode.conv.{}", 5);
 
             // layer.6 conv2d
-            cur = ggml_conv_2d_direct(ctx0, model.pre_encode_conv_6_w, cur, 1, 1, 0, 0, 1, 1);
-            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_6_b, 1, 1, cur->ne[2], 1));
+            cur = ggml_conv_2d_direct(ctx0, model.pre_encode_conv_X_w[6], cur, 1, 1, 0, 0, 1, 1);
+            cur = ggml_add(ctx0, cur, ggml_reshape_4d(ctx0, model.pre_encode_conv_X_b[6], 1, 1, cur->ne[2], 1));
             cb(cur, "conformer.pre_encode.conv.{}", 6);
 
             // layer.7 - relu
@@ -2102,7 +2095,7 @@ struct clip_graph {
         cb(pos_emb, "pos_emb", -1);
 
         for (int il = 0; il < hparams.n_layer; il++) {
-            auto & layer = model.layers[il];
+            const auto & layer = model.layers[il];
 
             auto * residual = cur;
 
@@ -2116,13 +2109,11 @@ struct clip_graph {
                 layer.ff_up_w, layer.ff_up_b,
                 nullptr, nullptr,
                 layer.ff_down_w, layer.ff_down_b,
-                FFN_SILU, il);  // TODO(tarek): read activation for ffn from hparams
+                FFN_SILU, il);
             cb(cur, "conformer.layers.{}.feed_forward1.linear2", il);
 
-            const auto fc_factor = 0.5f; // TODO(tarek): read from config
+            const auto fc_factor = 0.5f;
             residual = ggml_add(ctx0, residual, ggml_scale(ctx0, cur, fc_factor));
-
-
 
             // self-attention
             {
@@ -2223,8 +2214,7 @@ struct clip_graph {
 
                 x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
 
-                // torch.funtional.glu
-                // TODO(tarek): chekc if llama.cpp impl exists
+                // TODO: add support of torch.funtional.glu
                 {
                     int64_t d   = x->ne[0] / 2;
                     ggml_tensor *gate = ggml_sigmoid(ctx0, ggml_view_2d(ctx0, x, d, x->ne[1], x->nb[1], d * x->nb[0]));
@@ -2244,10 +2234,9 @@ struct clip_graph {
 
                 cb(x, "conformer.layers.{}.conv.depthwise_conv", il);
 
-                // TODO(tarek): fold into another op
                 {
                     x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
-                    x = ggml_add(ctx0, ggml_mul(ctx0, x, layer.conv_bn_w), layer.conv_bn_b);
+                    x = ggml_add(ctx0, ggml_mul(ctx0, x, layer.conv_norm_w), layer.conv_norm_b);
                     x = ggml_cont(ctx0, ggml_transpose(ctx0, x));
                     cb(x, "conformer.layers.{}.conv.batch_norm", il);
                 }
@@ -3561,16 +3550,10 @@ struct clip_model_loader {
                 } break;
             case PROJECTOR_TYPE_LFM2A:
                 {
-                    model.pre_encode_conv_0_w = get_tensor(string_format(TN_CONV1D, 0, "weight"));
-                    model.pre_encode_conv_0_b = get_tensor(string_format(TN_CONV1D, 0, "bias"));
-                    model.pre_encode_conv_2_w = get_tensor(string_format(TN_CONV1D, 2, "weight"));
-                    model.pre_encode_conv_2_b = get_tensor(string_format(TN_CONV1D, 2, "bias"));
-                    model.pre_encode_conv_3_w = get_tensor(string_format(TN_CONV1D, 3, "weight"));
-                    model.pre_encode_conv_3_b = get_tensor(string_format(TN_CONV1D, 3, "bias"));
-                    model.pre_encode_conv_5_w = get_tensor(string_format(TN_CONV1D, 5, "weight"));
-                    model.pre_encode_conv_5_b = get_tensor(string_format(TN_CONV1D, 5, "bias"));
-                    model.pre_encode_conv_6_w = get_tensor(string_format(TN_CONV1D, 6, "weight"));
-                    model.pre_encode_conv_6_b = get_tensor(string_format(TN_CONV1D, 6, "bias"));
+                    for (int i : {0, 2, 3, 5, 6}) {
+                        model.pre_encode_conv_X_w[i] = get_tensor(string_format(TN_CONV1D, i, "weight"));
+                        model.pre_encode_conv_X_b[i] = get_tensor(string_format(TN_CONV1D, i, "bias"));
+                    }
                     model.pre_encode_out_w    = get_tensor(string_format(TN_PRE_ENCODE_OUT, "weight"));
                     model.pre_encode_out_b    = get_tensor(string_format(TN_PRE_ENCODE_OUT, "bias"));
 
@@ -3601,14 +3584,14 @@ struct clip_model_loader {
 
                         layer.linear_pos_w = get_tensor(string_format(TN_LINEAR_POS, prefix, il, "weight"));
 
-                        layer.conv_bn_w  = get_tensor(string_format("convnext.%d.norm.%s", il, "weight"));
-                        layer.conv_bn_b  = get_tensor(string_format("convnext.%d.norm.%s", il, "bias"));
-                        layer.conv_dw_w  = get_tensor(string_format("convnext.%d.dw.%s",   il, "weight"));
-                        layer.conv_dw_b  = get_tensor(string_format("convnext.%d.dw.%s",   il, "bias"));
-                        layer.conv_pw1_w = get_tensor(string_format("convnext.%d.pw1.%s",  il, "weight"));
-                        layer.conv_pw1_b = get_tensor(string_format("convnext.%d.pw1.%s",  il, "bias"));
-                        layer.conv_pw2_w = get_tensor(string_format("convnext.%d.pw2.%s",  il, "weight"));
-                        layer.conv_pw2_b = get_tensor(string_format("convnext.%d.pw2.%s",  il, "bias"));
+                        layer.conv_norm_w  = get_tensor(string_format("convnext.%d.norm.%s", il, "weight"));
+                        layer.conv_norm_b  = get_tensor(string_format("convnext.%d.norm.%s", il, "bias"));
+                        layer.conv_dw_w    = get_tensor(string_format("convnext.%d.dw.%s",   il, "weight"));
+                        layer.conv_dw_b    = get_tensor(string_format("convnext.%d.dw.%s",   il, "bias"));
+                        layer.conv_pw1_w   = get_tensor(string_format("convnext.%d.pw1.%s",  il, "weight"));
+                        layer.conv_pw1_b   = get_tensor(string_format("convnext.%d.pw1.%s",  il, "bias"));
+                        layer.conv_pw2_w   = get_tensor(string_format("convnext.%d.pw2.%s",  il, "weight"));
+                        layer.conv_pw2_b   = get_tensor(string_format("convnext.%d.pw2.%s",  il, "bias"));
                     }
                 } break;
             default:
@@ -4853,7 +4836,7 @@ int clip_n_output_tokens_y(const struct clip_ctx * ctx, struct clip_image_f32 * 
     return 1;
 }
 
-int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * img) {
+int clip_n_output_tokens(const struct clip_ctx * ctx, const struct clip_image_f32 * img) {
     const auto & params = ctx->model.hparams;
 
     // for models with fixed size image, the input image is already pre-processed and resized to square
@@ -4968,7 +4951,9 @@ int clip_n_output_tokens(const struct clip_ctx * ctx, struct clip_image_f32 * im
                 n_patches += 2; // for BOI and EOI token embeddings
             } break;
         case PROJECTOR_TYPE_LFM2A:
-            return ((((img->nx + 1) / 2) + 1) / 2 + 1) / 2;
+            {
+                n_patches = ((((img->nx + 1) / 2) + 1) / 2 + 1) / 2;
+            } break;
         default:
             GGML_ABORT("unsupported projector type");
     }
