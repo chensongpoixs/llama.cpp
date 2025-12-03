@@ -8,7 +8,7 @@
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import Input from '$lib/components/ui/input/input.svelte';
 	import { conversationsStore, conversations } from '$lib/stores/conversations.svelte';
-	import { getPreviewText } from '$lib/utils/text';
+	import { getPreviewText } from '$lib/utils';
 	import ChatSidebarActions from './ChatSidebarActions.svelte';
 
 	const sidebar = Sidebar.useSidebar();
