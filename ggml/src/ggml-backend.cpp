@@ -285,10 +285,11 @@ void ggml_backend_tensor_set(struct ggml_tensor * tensor, const void * data, siz
     GGML_ASSERT(tensor->data != NULL && "tensor not allocated");
     GGML_ASSERT(offset + size <= ggml_nbytes(tensor) && "tensor write out of bounds");
 
+    // do not synchronize directly after dispatching async tensor copies
     static bool disable_sync_optimization = (getenv("GGML_CUDA_DISABLE_SYNC_OPTIMIZATION") != nullptr);
 
-    if (!disable_sync_optimization && buf->iface.set_tensor_sync_optional != NULL) {
-        buf->iface.set_tensor_sync_optional(buf, tensor, data, offset, size, false);
+    if (!disable_sync_optimization && buf->iface.set_tensor_async != NULL) {
+        buf->iface.set_tensor_async(buf, tensor, data, offset, size);
     } else {
         buf->iface.set_tensor(buf, tensor, data, offset, size);
     }
@@ -605,16 +606,16 @@ static void ggml_backend_multi_buffer_clear(ggml_backend_buffer_t buffer, uint8_
 }
 
 static const struct ggml_backend_buffer_i ggml_backend_multi_buffer_i = {
-    /* .free_buffer     = */ ggml_backend_multi_buffer_free_buffer,
-    /* .get_base        = */ NULL,
-    /* .init_tensor     = */ NULL,
-    /* .memset_tensor   = */ NULL,
-    /* .set_tensor      = */ NULL,
-    /* .set_tensor_s_o  = */ NULL,
-    /* .get_tensor      = */ NULL,
-    /* .cpy_tensor      = */ NULL,
-    /* .clear           = */ ggml_backend_multi_buffer_clear,
-    /* .reset           = */ NULL,
+    /* .free_buffer      = */ ggml_backend_multi_buffer_free_buffer,
+    /* .get_base         = */ NULL,
+    /* .init_tensor      = */ NULL,
+    /* .memset_tensor    = */ NULL,
+    /* .set_tensor       = */ NULL,
+    /* .set_tensor_async = */ NULL,
+    /* .get_tensor       = */ NULL,
+    /* .cpy_tensor       = */ NULL,
+    /* .clear            = */ ggml_backend_multi_buffer_clear,
+    /* .reset            = */ NULL,
 };
 
 ggml_backend_buffer_t ggml_backend_multi_buffer_alloc_buffer(ggml_backend_buffer_t * buffers, size_t n_buffers) {
@@ -2128,29 +2129,29 @@ static void ggml_backend_cpu_buffer_clear(ggml_backend_buffer_t buffer, uint8_t 
 }
 
 static const struct ggml_backend_buffer_i ggml_backend_cpu_buffer_i = {
-    /* .free_buffer     = */ ggml_backend_cpu_buffer_free_buffer,
-    /* .get_base        = */ ggml_backend_cpu_buffer_get_base,
-    /* .init_tensor     = */ NULL, // no initialization required
-    /* .memset_tensor   = */ ggml_backend_cpu_buffer_memset_tensor,
-    /* .set_tensor      = */ ggml_backend_cpu_buffer_set_tensor,
-    /* .set_tensor_s_o  = */ NULL,
-    /* .get_tensor      = */ ggml_backend_cpu_buffer_get_tensor,
-    /* .cpy_tensor      = */ ggml_backend_cpu_buffer_cpy_tensor,
-    /* .clear           = */ ggml_backend_cpu_buffer_clear,
-    /* .reset           = */ NULL,
+    /* .free_buffer      = */ ggml_backend_cpu_buffer_free_buffer,
+    /* .get_base         = */ ggml_backend_cpu_buffer_get_base,
+    /* .init_tensor      = */ NULL, // no initialization required
+    /* .memset_tensor    = */ ggml_backend_cpu_buffer_memset_tensor,
+    /* .set_tensor       = */ ggml_backend_cpu_buffer_set_tensor,
+    /* .set_tensor_async = */ NULL,
+    /* .get_tensor       = */ ggml_backend_cpu_buffer_get_tensor,
+    /* .cpy_tensor       = */ ggml_backend_cpu_buffer_cpy_tensor,
+    /* .clear            = */ ggml_backend_cpu_buffer_clear,
+    /* .reset            = */ NULL,
 };
 
 static const struct ggml_backend_buffer_i ggml_backend_cpu_buffer_from_ptr_i = {
-    /* .free_buffer     = */ NULL, // ptr is not owned by the buffer, so it does not need to be freed
-    /* .get_base        = */ ggml_backend_cpu_buffer_get_base,
-    /* .init_tensor     = */ NULL, // no initialization required
-    /* .memset_tensor   = */ ggml_backend_cpu_buffer_memset_tensor,
-    /* .set_tensor      = */ ggml_backend_cpu_buffer_set_tensor,
-    /* .set_tensor_s_o  = */ NULL,
-    /* .get_tensor      = */ ggml_backend_cpu_buffer_get_tensor,
-    /* .cpy_tensor      = */ ggml_backend_cpu_buffer_cpy_tensor,
-    /* .clear           = */ ggml_backend_cpu_buffer_clear,
-    /* .reset           = */ NULL,
+    /* .free_buffer      = */ NULL, // ptr is not owned by the buffer, so it does not need to be freed
+    /* .get_base         = */ ggml_backend_cpu_buffer_get_base,
+    /* .init_tensor      = */ NULL, // no initialization required
+    /* .memset_tensor    = */ ggml_backend_cpu_buffer_memset_tensor,
+    /* .set_tensor       = */ ggml_backend_cpu_buffer_set_tensor,
+    /* .set_tensor_async = */ NULL,
+    /* .get_tensor       = */ ggml_backend_cpu_buffer_get_tensor,
+    /* .cpy_tensor       = */ ggml_backend_cpu_buffer_cpy_tensor,
+    /* .clear            = */ ggml_backend_cpu_buffer_clear,
+    /* .reset            = */ NULL,
 };
 
 // CPU backend buffer type
