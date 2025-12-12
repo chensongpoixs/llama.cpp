@@ -13,7 +13,19 @@ if (NOT XCODE AND NOT MSVC AND NOT CMAKE_BUILD_TYPE)
 endif()
 
 message("CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}")
+# 修复 PDB 路径问题
+if(MSVC)
+    # 设置 PDB 文件名
+    set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Debug)
+    set(CMAKE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Debug)
+    
+    # 为所有目标设置 PDB 输出
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/Debug/\"")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/Debug/\"")
+endif()
 
+
+set(OPENSSL_ROOT_DIR  "D:/deps/openssl_1.1.0")
 # Add path to modules
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/")
 

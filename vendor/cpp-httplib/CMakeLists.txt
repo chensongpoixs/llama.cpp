@@ -8,6 +8,16 @@ if (NOT MSVC)
     target_compile_options(${TARGET} PRIVATE -w)
 endif()
 
+if(MSVC)
+    # 设置 PDB 文件名
+    set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Debug)
+    set(CMAKE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Debug)
+    
+    # 为所有目标设置 PDB 输出
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/Debug/\"")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/Debug/\"")
+endif()
+
 target_link_libraries  (${TARGET} PRIVATE Threads::Threads)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
@@ -112,25 +122,14 @@ elseif (LLAMA_OPENSSL)
         include(CheckCSourceCompiles)
         set(SAVED_CMAKE_REQUIRED_INCLUDES ${CMAKE_REQUIRED_INCLUDES})
         set(CMAKE_REQUIRED_INCLUDES ${OPENSSL_INCLUDE_DIR})
-        check_c_source_compiles("
-        #include <openssl/opensslv.h>
-        #if defined(OPENSSL_IS_BORINGSSL) || defined(LIBRESSL_VERSION_NUMBER)
-        #    if OPENSSL_VERSION_NUMBER < 0x1010107f
-        #        error bad version
-        #    endif
-        #else
-        #    if OPENSSL_VERSION_NUMBER < 0x30000000L
-        #        error bad version
-        #    endif
-        #endif
-        int main() { return 0; }
-        " OPENSSL_VERSION_SUPPORTED)
+        
         set(CMAKE_REQUIRED_INCLUDES ${SAVED_CMAKE_REQUIRED_INCLUDES})
-        if (OPENSSL_VERSION_SUPPORTED)
-            message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
-            set(CPPHTTPLIB_OPENSSL_SUPPORT TRUE)
-            target_link_libraries(${TARGET} PUBLIC OpenSSL::SSL OpenSSL::Crypto)
-        endif()
+        
+        message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+        set(CPPHTTPLIB_OPENSSL_SUPPORT TRUE)
+        target_link_libraries(${TARGET} PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+        message(status "==========> ${TARGET} PUBLIC OpenSSL::SSL OpenSSL::Crypto")
+        
     else()
         message(STATUS "OpenSSL not found, SSL support disabled")
     endif()
@@ -143,8 +142,10 @@ if (CPPHTTPLIB_OPENSSL_SUPPORT)
         find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
         find_library(SECURITY_FRAMEWORK Security REQUIRED)
         target_link_libraries(${TARGET} PUBLIC ${CORE_FOUNDATION_FRAMEWORK} ${SECURITY_FRAMEWORK})
+        message(status "---->>>>>>>> ${TARGET} PUBLIC ${CORE_FOUNDATION_FRAMEWORK} ${SECURITY_FRAMEWORK}")
     endif()
     if (WIN32 AND NOT MSVC)
         target_link_libraries(${TARGET} PUBLIC crypt32)
+        message(status  "--->>>> ${TARGET}")
     endif()
 endif()

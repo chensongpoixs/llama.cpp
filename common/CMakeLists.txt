@@ -6,7 +6,16 @@ llama_add_compile_flags()
 
 # Build info header
 #
-
+# 修复 PDB 路径问题
+if(MSVC)
+    # 设置 PDB 文件名
+    set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    set(CMAKE_PDB_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    
+    # 为所有目标设置 PDB 输出
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/\"")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Fd\"${CMAKE_BINARY_DIR}/bin/\"")
+endif()
 if(EXISTS "${PROJECT_SOURCE_DIR}/.git")
     set(GIT_DIR "${PROJECT_SOURCE_DIR}/.git")
 
@@ -37,6 +46,10 @@ set(OUTPUT_FILE   "${CMAKE_CURRENT_BINARY_DIR}/build-info.cpp")
 configure_file(${TEMPLATE_FILE} ${OUTPUT_FILE})
 
 set(TARGET build_info)
+
+
+message(status " BUILD_SHARED_LIBS = ${BUILD_SHARED_LIBS}, target = ${TARGET},   output =-  ${OUTPUT_FILE} , LLAMA_LLGUIDANCE = ${LLAMA_LLGUIDANCE}")
+
 add_library(${TARGET} OBJECT ${OUTPUT_FILE})
 if (BUILD_SHARED_LIBS)
     set_target_properties(${TARGET} PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -127,19 +140,19 @@ if (LLAMA_LLGUIDANCE)
         set(LLGUIDANCE_PLATFORM_LIBS "")
     endif()
 
-    ExternalProject_Add(llguidance_ext
-        GIT_REPOSITORY https://github.com/guidance-ai/llguidance
-        # v1.0.1:
-        GIT_TAG d795912fedc7d393de740177ea9ea761e7905774
-        PREFIX ${CMAKE_BINARY_DIR}/llguidance
-        SOURCE_DIR ${LLGUIDANCE_SRC}
-        BUILD_IN_SOURCE TRUE
-        CONFIGURE_COMMAND ""
-        BUILD_COMMAND cargo build --release --package llguidance
-        INSTALL_COMMAND ""
-        BUILD_BYPRODUCTS ${LLGUIDANCE_PATH}/${LLGUIDANCE_LIB_NAME} ${LLGUIDANCE_PATH}/llguidance.h
-        UPDATE_COMMAND ""
-    )
+    #ExternalProject_Add(llguidance_ext
+    #    GIT_REPOSITORY https://github.com/guidance-ai/llguidance
+    #    # v1.0.1:
+    #    GIT_TAG d795912fedc7d393de740177ea9ea761e7905774
+    #    PREFIX ${CMAKE_BINARY_DIR}/llguidance
+    #    SOURCE_DIR ${LLGUIDANCE_SRC}
+    #    BUILD_IN_SOURCE TRUE
+    #    CONFIGURE_COMMAND ""
+    #    BUILD_COMMAND cargo build --release --package llguidance
+    #    INSTALL_COMMAND ""
+    #    BUILD_BYPRODUCTS ${LLGUIDANCE_PATH}/${LLGUIDANCE_LIB_NAME} ${LLGUIDANCE_PATH}/llguidance.h
+    #    UPDATE_COMMAND ""
+    #)
     target_compile_definitions(${TARGET} PUBLIC LLAMA_USE_LLGUIDANCE)
 
     add_library(llguidance STATIC IMPORTED)
@@ -155,26 +168,11 @@ target_include_directories(${TARGET} PUBLIC . ../vendor)
 target_compile_features   (${TARGET} PUBLIC cxx_std_17)
 target_link_libraries     (${TARGET} PRIVATE ${LLAMA_COMMON_EXTRA_LIBS} PUBLIC llama Threads::Threads)
 
-
+message(status "- ${TARGET} --> LLAMA_COMMON_EXTRA_LIBS = ${LLAMA_COMMON_EXTRA_LIBS}")
 #
 # copy the license files
 #
 
 # Check if running in GitHub Actions
-if (DEFINED ENV{GITHUB_ACTIONS} AND "$ENV{GITHUB_ACTIONS}" STREQUAL "true")
-    message(STATUS "Running inside GitHub Actions - copying license files")
 
-    # Copy all files from licenses/ to build/bin/
-    file(GLOB LICENSE_FILES "${CMAKE_SOURCE_DIR}/licenses/*")
-    foreach(LICENSE_FILE ${LICENSE_FILES})
-        get_filename_component(FILENAME ${LICENSE_FILE} NAME)
-        add_custom_command(
-            POST_BUILD
-            TARGET ${TARGET}
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${LICENSE_FILE}"
-                "$<TARGET_FILE_DIR:llama>/${FILENAME}"
-            COMMENT "Copying ${FILENAME} to ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
-        message(STATUS "Copying ${LICENSE_FILE} to ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${FILENAME}")
-    endforeach()
-endif()
+
